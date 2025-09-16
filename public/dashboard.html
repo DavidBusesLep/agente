@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI Orchestrator - Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="min-h-screen bg-gray-50 text-gray-900">
+    <div class="max-w-4xl mx-auto py-10 px-4">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-2xl font-bold">Dashboard</h1>
+        <button id="logout" class="text-sm text-red-600">Cerrar sesión</button>
+      </div>
+      <div id="info" class="grid md:grid-cols-3 gap-4 mb-8"></div>
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-xl font-semibold">Últimos consumos</h2>
+          <button id="regen" class="text-sm bg-indigo-600 text-white px-3 py-1 rounded">Regenerar API key</button>
+        </div>
+        <div class="bg-white shadow rounded overflow-x-auto">
+          <table class="min-w-full">
+            <thead class="bg-gray-100">
+              <tr>
+                <th class="text-left p-2">Fecha</th>
+                <th class="text-left p-2">Modelo</th>
+                <th class="text-right p-2">Tokens In</th>
+                <th class="text-right p-2">Tokens Out</th>
+                <th class="text-right p-2">Costo (USD)</th>
+              </tr>
+            </thead>
+            <tbody id="logs"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      function fmt(n){ return new Intl.NumberFormat('es-AR', { maximumFractionDigits: 6 }).format(n) }
+      async function get(path){ const r = await fetch(path); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+      async function post(path, data){ const r = await fetch(path, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(data||{})}); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+
+      async function load() {
+        try {
+          const me = await get('/api/me');
+          const usage = await get('/api/usage');
+
+          document.getElementById('info').innerHTML = `
+            <div class="bg-white p-4 rounded shadow">
+              <div class="text-sm text-gray-500">Tenant</div>
+              <div class="text-lg font-semibold">${me.tenant.name}</div>
+            </div>
+            <div class="bg-white p-4 rounded shadow">
+              <div class="text-sm text-gray-500">Balance</div>
+              <div class="text-lg font-semibold">$ ${fmt(me.tenant.balance)}</div>
+            </div>
+            <div class="bg-white p-4 rounded shadow">
+              <div class="text-sm text-gray-500">API Key</div>
+              <div class="text-xs break-all">${me.tenant.apikey}</div>
+            </div>`;
+
+          const tbody = document.getElementById('logs');
+          tbody.innerHTML = '';
+          for (const log of usage.logs) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td class="p-2">${new Date(log.createdAt).toLocaleString()}</td>
+              <td class="p-2">${log.modelId}</td>
+              <td class="p-2 text-right">${fmt(log.tokensIn)}</td>
+              <td class="p-2 text-right">${fmt(log.tokensOut)}</td>
+              <td class="p-2 text-right">$ ${fmt(log.costUsd)}</td>`;
+            tbody.appendChild(tr);
+          }
+        } catch (e) {
+          location.href = '/';
+        }
+      }
+
+      document.getElementById('logout').addEventListener('click', async () => {
+        await post('/auth/logout');
+        location.href = '/';
+      });
+
+      document.getElementById('regen').addEventListener('click', async () => {
+        try { const r = await post('/api/regenerate-key'); alert('Nueva API key: ' + r.apikey); load(); } catch(e){ alert('Error: '+e) }
+      });
+
+      load();
+    </script>
+  </body>
+  </html>
+
+
