@@ -76,7 +76,7 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
       mainSent = true;
       
       try {
-        console.log('[MCP] Sending main request with ID:', requestId);
+        console.log('[MCP] Sending main request with ID: "2"');
         await fetch(messagesUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...headers },
@@ -104,9 +104,9 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           id: 1, // Use static ID like in your example
           method: 'initialize',
           params: {
-            protocolVersion: '1.0',
+            protocolVersion: '2025-06-18',
             clientInfo: { name: 'ai-orchestrator', version: '0.1.0' },
-            capabilities: { prompts: {}, resources: {}, tools: {} }
+            capabilities: { tools: {}, prompts: {}, resources: {} }
           }
         };
         
@@ -209,7 +209,7 @@ async function mcpListTools(serverUrl: string, headers: Record<string, string> =
       // Use exact format from your working example
       const json = await mcpSseRequest(serverUrl, { 
         jsonrpc: '2.0', 
-        id: 2, // Use static ID like in your example
+        id: "2", // Use string ID like your server expects
         method: 'tools/list', 
         params: {} 
       }, headers);
