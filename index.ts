@@ -9,294 +9,12 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import OpenAI from 'openai';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import EventSource from 'eventsource';
-import { Agent } from 'node:https';
+// MCP removido
 
-// Minimal MCP HTTP-like adapter (JSON-RPC over HTTP convention)
-type McpTool = {
-  name: string;
-  description?: string;
-  input_schema?: Record<string, unknown>;
-};
+// SQL Server (para tools locales)
+import { getOpenAiToolDefs, executeLocalTool } from './src/tools/localTools';
 
-function buildMcpCandidates(rawUrl: string): string[] {
-  const urls: string[] = [];
-  // If user passed an SSE endpoint, try common HTTP RPC fallbacks
-  if (rawUrl.endsWith('/sse')) {
-    const origin = rawUrl.replace(/\/?sse$/, '');
-    urls.push(origin + '/mcp');
-    urls.push(origin + '/messages');
-    urls.push(origin);
-  } else {
-    urls.push(rawUrl + '/mcp');
-    urls.push(rawUrl);
-  }
-  // Deduplicate
-  return [...new Set(urls)];
-}
-
-function isSseUrl(url: string): boolean {
-  return /\/?sse$/.test(url);
-}
-
-// Shared agent para reutilizar conexiones
-const httpsAgent = new Agent({
-  keepAlive: true,
-  maxSockets: 1,
-  timeout: 60000
-});
-
-// Keep SSE alive approach
-async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<string, string>) {
-  const requestId = body?.id ?? randomUUID();
-  // Don't convert number IDs to strings
-  if (typeof requestId !== 'number') {
-    body = { ...body, id: String(requestId) };
-  }
-  const base = serverUrl.replace(/\/?sse$/, '');
-  
-  return new Promise<any>((resolve, reject) => {
-    let sessionId: string | null = null;
-    let messagesUrl: string | null = null;
-    let initSent = false;
-    let mainSent = false;
-    let initId: string | null = null;
-    
-    // Single SSE connection for the entire process
-    const es = new EventSource(serverUrl, { headers } as any);
-    
-    const cleanup = () => {
-      try { es.close(); } catch {}
-    };
-    
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error('MCP timeout'));
-    }, 30000);
-    
-    const sendMainRequest = async () => {
-      if (mainSent || !messagesUrl) return;
-      mainSent = true;
-      
-      try {
-        console.log('[MCP] Sending main request with ID: 2');
-        console.log('[MCP] Request body:', JSON.stringify(body));
-        await fetch(messagesUrl, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', ...headers },
-          body: JSON.stringify(body),
-          agent: messagesUrl.startsWith('https:') ? httpsAgent : undefined
-        });
-        console.log('[MCP] Main request sent, waiting for response...');
-      } catch (e) {
-        console.log('[MCP] Error sending main request:', e);
-        cleanup();
-        clearTimeout(timeout);
-        reject(e);
-      }
-    };
-
-    const sendRequests = async () => {
-      if (!messagesUrl || initSent) return;
-      initSent = true;
-      
-      try {
-        // 1) Initialize
-        initId = `init-${requestId}`;
-        const initBody = {
-          jsonrpc: '2.0',
-          id: 1, // número, no string
-          method: 'initialize',
-          params: {
-            protocolVersion: '2025-06-18',
-            clientInfo: { name: 'test', version: '0.1.0' }, // Restaurar version - es requerido
-            capabilities: { tools: {} }
-          }
-        };
-        
-        console.log('[MCP] Sending initialize request with ID:', initId);
-        await fetch(messagesUrl, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json', ...headers },
-          body: JSON.stringify(initBody),
-          agent: messagesUrl.startsWith('https:') ? httpsAgent : undefined
-        });
-        
-        console.log('[MCP] Initialize request sent, waiting for response...');
-        // NO enviamos main request aquí - esperamos respuesta de initialize
-        
-      } catch (e) {
-        console.log('[MCP] Error sending initialize:', e);
-        cleanup();
-        clearTimeout(timeout);
-        reject(e);
-      }
-    };
-    
-    // Handle endpoint event
-    es.addEventListener('endpoint', (ev: any) => {
-      try {
-        const path = typeof ev?.data === 'string' ? ev.data : ev?.data?.toString?.() ?? '';
-        if (path && path.includes('/messages/')) {
-          messagesUrl = base + (path.startsWith('/') ? path : '/' + path);
-          const match = path.match(/session_id=([^&\s]+)/);
-          if (match) sessionId = match[1];
-          void sendRequests();
-        }
-      } catch {}
-    });
-    
-    // Handle message responses
-    es.onmessage = (ev: any) => {
-      try {
-        console.log('[MCP] SSE message received:', ev.data);
-        const json = JSON.parse(ev.data);
-        
-        // Initialize response - now send main request
-        if (json?.id === 1) { // Match static ID
-          console.log('[MCP] Initialize response received, sending main request');
-          void sendMainRequest();
-          return;
-        }
-        
-        // Main response (number ID)
-        if (json?.id === 2) { // Match número ID for tools/list
-          console.log('[MCP] Main response received');
-          cleanup();
-          clearTimeout(timeout);
-          resolve(json);
-          return;
-        }
-        
-        // Generic response fallback
-        if (json?.result !== undefined || json?.error !== undefined) {
-          console.log('[MCP] Generic response received');
-          cleanup();
-          clearTimeout(timeout);
-          resolve(json);
-        }
-      } catch (e) {
-        console.log('[MCP] Error parsing SSE message:', e);
-      }
-    };
-    
-    es.onerror = () => {
-      // Keep connection open for transient errors
-    };
-  });
-}
-
-async function mcpSseRequest(serverSseUrl: string, body: any, headers: Record<string, string>) {
-  // Try simplified HTTP-only approach first
-  return mcpHttpOnlyRequest(serverSseUrl, body, headers);
-}
-
-async function mcpRpcTry(candidates: string[], body: any, headers: Record<string, string>) {
-  let lastError: any;
-  for (const url of candidates) {
-    try {
-      const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
-      if (!res.ok) { lastError = new Error(`HTTP ${res.status}`); continue; }
-      const json = await res.json();
-      if (json?.result !== undefined || json?.error) return json;
-      lastError = new Error('Invalid MCP JSON-RPC response');
-    } catch (e) {
-      lastError = e;
-    }
-  }
-  throw lastError ?? new Error('All MCP endpoints failed');
-}
-
-async function mcpListTools(serverUrl: string, headers: Record<string, string> = {}, mode: 'sse' | 'http' = 'sse'): Promise<McpTool[]> {
-  try {
-    if (mode === 'http') {
-      // Direct HTTP JSON-RPC (no SSE)
-      const baseUrl = serverUrl.replace(/\/?sse$/, '');
-      const endpoints = [baseUrl + '/rpc', baseUrl + '/', baseUrl + '/jsonrpc', baseUrl];
-      
-      // 1. Initialize first (required for your server)
-      try {
-        await mcpRpcTry(endpoints, {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'initialize',
-          params: {
-            protocolVersion: '2025-06-18',
-            clientInfo: { name: 'ai-orchestrator', version: '0.1.0' },
-            capabilities: { tools: {} }
-          }
-        }, headers);
-        console.log('[MCP-HTTP] Initialized successfully');
-      } catch (e) {
-        console.log('[MCP-HTTP] Initialize failed:', e);
-      }
-      
-      // 2. List tools
-      const json = await mcpRpcTry(endpoints, { 
-        jsonrpc: '2.0', 
-        id: 2,
-        method: 'tools/list',
-        params: {}
-      }, headers);
-      return json?.result?.tools ?? [];
-    }
-    
-    if (isSseUrl(serverUrl)) {
-      // SSE mode (existing logic)
-      let json;
-      try {
-        json = await mcpSseRequest(serverUrl, { 
-          jsonrpc: '2.0', 
-          id: 2,
-          method: 'tools/list'
-          // No params field at all
-        }, headers);
-      } catch (e) {
-        // Fallback: try with empty params
-        json = await mcpSseRequest(serverUrl, { 
-          jsonrpc: '2.0', 
-          id: 2,
-          method: 'tools/list',
-          params: {}
-        }, headers);
-      }
-      return json?.result?.tools ?? [];
-    }
-    const candidates = buildMcpCandidates(serverUrl);
-    const json = await mcpRpcTry(candidates, { jsonrpc: '2.0', id: randomUUID(), method: 'tools/list', params: {} }, headers);
-    return json?.result?.tools ?? [];
-  } catch {
-    return [];
-  }
-}
-
-async function mcpCallTool(serverUrl: string, toolName: string, args: unknown, headers: Record<string, string> = {}, mode: 'sse' | 'http' = 'sse'): Promise<unknown> {
-  if (mode === 'http') {
-    // Direct HTTP JSON-RPC (no SSE)
-    const baseUrl = serverUrl.replace(/\/?sse$/, '');
-    const endpoints = [baseUrl + '/rpc', baseUrl + '/', baseUrl + '/jsonrpc', baseUrl];
-    const json = await mcpRpcTry(endpoints, { 
-      jsonrpc: '2.0', 
-      id: 3,
-      method: 'tools/call', 
-      params: { name: toolName, arguments: args } 
-    }, headers);
-    if (json.error) throw new Error(json.error.message ?? 'MCP tool call failed');
-    return json.result;
-  }
-  
-  if (isSseUrl(serverUrl)) {
-    const json = await mcpSseRequest(serverUrl, { jsonrpc: '2.0', id: randomUUID(), method: 'tools/call', params: { name: toolName, arguments: args } }, headers);
-    if (json.error) throw new Error(json.error.message ?? 'MCP tool call failed');
-    return json.result;
-  }
-  const candidates = buildMcpCandidates(serverUrl);
-  const json = await mcpRpcTry(candidates, { jsonrpc: '2.0', id: randomUUID(), method: 'tools/call', params: { name: toolName, arguments: args } }, headers);
-  if (json.error) {
-    throw new Error(json.error.message ?? 'MCP tool call failed');
-  }
-  return json.result;
-}
+// MCP eliminado completamente
 
 // Very rough token estimator: ~4 chars per token
 function estimateTokensFromText(text: string): number {
@@ -498,14 +216,20 @@ app.post('/tenants/register', async (req, reply) => {
   reply.send(created);
 });
 
-// Input schema for /ai/answer
+// Input schema para /ai/answer
 const AiAnswerRequestSchema = z.object({
   system: z.object({ prompt: z.string().min(1), policies: z.object({ temperature: z.number().min(0).max(2).default(0.2), max_tokens: z.number().int().positive().max(4000).default(500) }) }),
   conversation: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string() })).min(1),
-  mcp_servers: z.array(z.object({ name: z.string(), url: z.string().url(), headers: z.record(z.string()).optional(), session_id: z.string().optional(), mode: z.enum(['sse', 'http']).default('sse') })).default([]),
-  webhook_tools: z.array(z.object({ name: z.string(), base_url: z.string().url(), headers: z.record(z.string()).optional() })).default([]),
-  model: z.string().min(1)
+  model: z.string().min(1),
+  trace: z.boolean().optional().default(false),
+  context_tools: z.array(z.object({
+    name: z.string(),
+    args: z.unknown().optional(),
+    result: z.unknown().optional()
+  })).optional().default([])
 });
+
+// Tools importadas desde src/tools/localTools
 
 app.post('/ai/answer', async (req, reply) => {
   const parsed = AiAnswerRequestSchema.parse(req.body);
@@ -518,45 +242,14 @@ app.post('/ai/answer', async (req, reply) => {
     return;
   }
 
-  // 3. Discover tools (webhook + MCP)
-  const allTools: McpTool[] = [];
-  
-  // A) Simple webhook tools
-  console.log('[WEBHOOK] Attempting to discover tools from', parsed.webhook_tools.length, 'webhook servers');
-  for (const srv of parsed.webhook_tools) {
-    try {
-      const res = await fetch(`${srv.base_url}/tools/list`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...srv.headers },
-        body: JSON.stringify({})
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const tools = data.tools || [];
-        console.log('[WEBHOOK] Discovered', tools.length, 'tools from', srv.name);
-        allTools.push(...tools.map((t: any) => ({ ...t, name: `${srv.name}.${t.name}`, source: 'webhook', baseUrl: srv.base_url, headers: srv.headers })));
-      }
-    } catch (e) {
-      console.log('[WEBHOOK] Failed to get tools from', srv.name, ':', e);
-    }
-  }
-  
-  // B) MCP tools (if any)
-  console.log('[MCP] Attempting to discover tools from', parsed.mcp_servers.length, 'servers');
-  for (const srv of parsed.mcp_servers) {
-    try {
-      const tools = await mcpListTools(srv.url, srv.headers ?? {}, srv.mode);
-      console.log(`[MCP-${srv.mode.toUpperCase()}] Discovered`, tools.length, 'tools from', srv.name);
-      allTools.push(...tools.map(t => ({ ...t, name: `${srv.name}.${t.name}`, source: 'mcp', mode: srv.mode })));
-    } catch (e) {
-      console.log(`[MCP-${srv.mode.toUpperCase()}] Failed to get tools from`, srv.name, ':', e);
-    }
-  }
-  console.log('[TOTAL] Tools available:', allTools.length);
+  // Sin tools (MCP/webhook removidos)
 
-  // 4. Build messages
+  // 4. Build messages (inyectar context_tools si viene)
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
     { role: 'system', content: parsed.system.prompt },
+    ...(parsed.context_tools && parsed.context_tools.length
+      ? [{ role: 'system', content: `Contexto de herramientas previas: ${JSON.stringify(parsed.context_tools)}` } as any]
+      : []),
     ...parsed.conversation
   ];
 
@@ -572,87 +265,62 @@ app.post('/ai/answer', async (req, reply) => {
     return;
   }
 
-  // 5. Call OpenAI with tools
-  const toolNameMap = new Map<string, string>(); // sanitized -> original
-  const toolDefs = allTools.slice(0, 64).map(t => {
-    const sanitizedName = t.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-    toolNameMap.set(sanitizedName, t.name);
-    if (sanitizedName !== t.name) {
-      console.log(`[SANITIZE] "${t.name}" -> "${sanitizedName}"`);
-    }
-    return {
-      type: 'function' as const,
-      function: {
-        name: sanitizedName,
-        description: t.description ?? 'Tool',
-        parameters: t.input_schema ?? { type: 'object', properties: {}, additionalProperties: true }
-      }
-    };
-  });
-
-  const first = await createChatCompletionAdaptive({
-    model: model.name,
-    messages: baseMessages,
-    temperature: parsed.system.policies.temperature,
-    max_tokens: parsed.system.policies.max_tokens,
-    tools: toolDefs.length ? toolDefs : undefined
-  });
-
+  // 5. Loop de function calling: ejecutar todas las tools necesarias (límite de rondas)
+  const toolDefs = getOpenAiToolDefs();
   let messages = [...baseMessages];
-  let assistantMessage = first.choices[0]?.message;
-  let toolCalls = assistantMessage?.tool_calls ?? [];
-
-  if (toolCalls && toolCalls.length > 0) {
-    // 6. Append assistant message with tool_calls before sending tool results
-    messages.push(assistantMessage as any);
-
-    // 7. Execute tool calls
-    for (const call of toolCalls) {
-      const sanitizedName = call.function?.name as string;
-      const originalName = toolNameMap.get(sanitizedName) || sanitizedName;
-      const [serverName, toolLocal] = originalName.split('.', 2);
-      const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
-      
-      // Find tool source
-      const tool = allTools.find(t => t.name === originalName);
-      let result;
-      
-      if (tool?.source === 'webhook') {
-        // Simple webhook call
-        try {
-          const res = await fetch(`${tool.baseUrl}/tools/call`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', ...tool.headers },
-            body: JSON.stringify({ name: toolLocal, arguments: args })
-          });
-          result = res.ok ? await res.json() : { error: 'Webhook call failed' };
-        } catch (e) {
-          result = { error: String(e) };
-        }
-      } else {
-        // MCP call (SSE or HTTP)
-        const srv = parsed.mcp_servers.find(s => s.name === serverName);
-        if (srv) {
-          try {
-            result = await mcpCallTool(srv.url, toolLocal, args, srv.headers ?? {}, srv.mode);
-          } catch (e) {
-            result = { error: String(e) };
-          }
-        }
-      }
-      
-      const toolCallId = (call as any).id || (call as any).tool_call_id;
-      const toolContent = typeof result === 'string' ? result : JSON.stringify(result);
-      messages.push({ role: 'tool', tool_call_id: toolCallId, content: toolContent } as any);
-    }
-    // 8. Final response after tools
-    const second = await createChatCompletionAdaptive({
+  let assistantMessage: any = null;
+  const traceLog: any[] = [];
+  const contextToolsOut: Array<{ name: string; args: any; result: any }> = [];
+  for (let round = 0; round < 16; round++) {
+    const resp = await createChatCompletionAdaptive({
       model: model.name,
       messages,
       temperature: parsed.system.policies.temperature,
-      max_tokens: parsed.system.policies.max_tokens
+      max_tokens: parsed.system.policies.max_tokens,
+      tools: toolDefs.length ? toolDefs : undefined
     });
-    assistantMessage = second.choices[0]?.message;
+    assistantMessage = resp.choices[0]?.message;
+    if (assistantMessage) messages.push(assistantMessage as any);
+    if ((parsed as any).trace) {
+      const tc: any[] = assistantMessage?.tool_calls ?? [];
+      const rawContent = (assistantMessage?.content ?? '') as string;
+      const contentTrim = rawContent ? String(rawContent).trim() : '';
+      const fallback = tc && tc.length ? `Solicita ejecutar ${tc.map((t: any) => t?.function?.name).filter(Boolean).join(', ')}` : '';
+      const assistantText = contentTrim || fallback;
+      traceLog.push({
+        round: round + 1,
+        assistant_message: assistantText,
+        assistant_tool_only: !contentTrim && tc && tc.length > 0,
+        tool_calls: tc.map((t: any) => ({ name: t?.function?.name, arguments: t?.function?.arguments }))
+      });
+    }
+    const toolCalls: any[] = assistantMessage?.tool_calls ?? [];
+    if (!toolCalls || toolCalls.length === 0) {
+      break; // no más tools; responder
+    }
+    console.log(`[TOOLS] Round ${round + 1}: executing ${toolCalls.length} tool call(s)`);
+    for (const call of toolCalls) {
+      const toolName = call.function?.name as string;
+      let args: any = {};
+      try { args = call.function?.arguments ? JSON.parse(call.function.arguments) : {}; } catch { args = {}; }
+      try {
+        const argsStr = (() => { try { return JSON.stringify(args); } catch { return String(args); } })();
+        console.log(`[TOOL] Executing ${toolName} with args: ${argsStr}`);
+      } catch {}
+      const result = await executeLocalTool(toolName, args);
+      try {
+        const resStr = (() => { try { return typeof result === 'string' ? result : JSON.stringify(result); } catch { return String(result); } })();
+        console.log(`[TOOL] Result for ${toolName}: ${resStr}`);
+      } catch {}
+      try { contextToolsOut.push({ name: toolName, args, result }); } catch {}
+      const toolCallId = (call as any).id || (call as any).tool_call_id;
+      const toolContent = typeof result === 'string' ? result : JSON.stringify(result);
+      messages.push({ role: 'tool', tool_call_id: toolCallId, content: toolContent } as any);
+      if ((parsed as any).trace) {
+        traceLog.push({ round: round + 1, tool_result: { name: toolName, result } });
+      }
+    }
+    // Continúa a siguiente ronda; el loop hará una nueva llamada con resultados agregados
   }
 
   const finalAnswer = assistantMessage?.content ?? '';
@@ -694,10 +362,11 @@ app.post('/ai/answer', async (req, reply) => {
     throw err;
   }
 
-  // 10. Return response
+  // 10. Return response (devolver context_tools para próxima llamada)
   reply.send({
     answer: { role: 'assistant', content: finalAnswer },
-    tool_calls: toolCalls
+    tool_calls: (assistantMessage?.tool_calls ?? []),
+    context_tools: contextToolsOut
   });
 });
 
