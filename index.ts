@@ -362,6 +362,12 @@ async function createChatCompletionAdaptive(params: any) {
       (retry as any).max_completion_tokens = params.max_tokens;
       return await openai.chat.completions.create(retry as any);
     }
+    // Fallback: algunos modelos no soportan tools. Reintentamos sin tools.
+    if (msg.toLowerCase().includes('tools is not supported')) {
+      const retry = { ...params };
+      delete (retry as any).tools;
+      return await openai.chat.completions.create(retry as any);
+    }
     throw err;
   }
 }
@@ -597,7 +603,10 @@ app.post('/ai/answer', async (req, reply) => {
   let toolCalls = assistantMessage?.tool_calls ?? [];
 
   if (toolCalls && toolCalls.length > 0) {
-    // 6. Execute tool calls
+    // 6. Append assistant message with tool_calls before sending tool results
+    messages.push(assistantMessage as any);
+
+    // 7. Execute tool calls
     for (const call of toolCalls) {
       const sanitizedName = call.function?.name as string;
       const originalName = toolNameMap.get(sanitizedName) || sanitizedName;
@@ -632,9 +641,11 @@ app.post('/ai/answer', async (req, reply) => {
         }
       }
       
-      messages.push({ role: 'tool', content: JSON.stringify({ tool: originalName, result }) } as any);
+      const toolCallId = (call as any).id || (call as any).tool_call_id;
+      const toolContent = typeof result === 'string' ? result : JSON.stringify(result);
+      messages.push({ role: 'tool', tool_call_id: toolCallId, content: toolContent } as any);
     }
-    // 7. Final response after tools
+    // 8. Final response after tools
     const second = await createChatCompletionAdaptive({
       model: model.name,
       messages,
