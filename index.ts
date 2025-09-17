@@ -567,14 +567,22 @@ app.post('/ai/answer', async (req, reply) => {
   }
 
   // 5. Call OpenAI with tools
-  const toolDefs = allTools.slice(0, 64).map(t => ({
-    type: 'function' as const,
-    function: {
-      name: t.name,
-      description: t.description ?? 'Tool',
-      parameters: t.input_schema ?? { type: 'object', properties: {}, additionalProperties: true }
+  const toolNameMap = new Map<string, string>(); // sanitized -> original
+  const toolDefs = allTools.slice(0, 64).map(t => {
+    const sanitizedName = t.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+    toolNameMap.set(sanitizedName, t.name);
+    if (sanitizedName !== t.name) {
+      console.log(`[SANITIZE] "${t.name}" -> "${sanitizedName}"`);
     }
-  }));
+    return {
+      type: 'function' as const,
+      function: {
+        name: sanitizedName,
+        description: t.description ?? 'Tool',
+        parameters: t.input_schema ?? { type: 'object', properties: {}, additionalProperties: true }
+      }
+    };
+  });
 
   const first = await createChatCompletionAdaptive({
     model: model.name,
@@ -591,12 +599,13 @@ app.post('/ai/answer', async (req, reply) => {
   if (toolCalls && toolCalls.length > 0) {
     // 6. Execute tool calls
     for (const call of toolCalls) {
-      const name = call.function?.name as string;
-      const [serverName, toolLocal] = name.split('.', 2);
+      const sanitizedName = call.function?.name as string;
+      const originalName = toolNameMap.get(sanitizedName) || sanitizedName;
+      const [serverName, toolLocal] = originalName.split('.', 2);
       const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
       
       // Find tool source
-      const tool = allTools.find(t => t.name === name);
+      const tool = allTools.find(t => t.name === originalName);
       let result;
       
       if (tool?.source === 'webhook') {
@@ -623,7 +632,7 @@ app.post('/ai/answer', async (req, reply) => {
         }
       }
       
-      messages.push({ role: 'tool', content: JSON.stringify({ tool: name, result }) } as any);
+      messages.push({ role: 'tool', content: JSON.stringify({ tool: originalName, result }) } as any);
     }
     // 7. Final response after tools
     const second = await createChatCompletionAdaptive({
