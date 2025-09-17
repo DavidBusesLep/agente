@@ -48,8 +48,11 @@ const httpsAgent = new Agent({
 
 // Keep SSE alive approach
 async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<string, string>) {
-  const requestId = String(body?.id ?? randomUUID());
-  body = { ...body, id: requestId };
+  const requestId = body?.id ?? randomUUID();
+  // Don't convert number IDs to strings
+  if (typeof requestId !== 'number') {
+    body = { ...body, id: String(requestId) };
+  }
   const base = serverUrl.replace(/\/?sse$/, '');
   
   return new Promise<any>((resolve, reject) => {
