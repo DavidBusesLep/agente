@@ -109,8 +109,8 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           method: 'initialize',
           params: {
             protocolVersion: '2025-06-18',
-            clientInfo: { name: 'test', version: '0.1.0' },
-            capabilities: { tools: {}, prompts: {}, resources: {} }
+            clientInfo: { name: 'test' }, // Sin version como en tu ejemplo
+            capabilities: { tools: {} } // Solo tools como en tu ejemplo
           }
         };
         
