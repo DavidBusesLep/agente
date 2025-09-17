@@ -76,13 +76,16 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
       mainSent = true;
       
       try {
+        console.log('[MCP] Sending main request with ID:', requestId);
         await fetch(messagesUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...headers },
           body: JSON.stringify(body),
           agent: messagesUrl.startsWith('https:') ? httpsAgent : undefined
         });
+        console.log('[MCP] Main request sent, waiting for response...');
       } catch (e) {
+        console.log('[MCP] Error sending main request:', e);
         cleanup();
         clearTimeout(timeout);
         reject(e);
@@ -107,6 +110,7 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           }
         };
         
+        console.log('[MCP] Sending initialize request with ID:', initId);
         await fetch(messagesUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...headers },
@@ -114,9 +118,11 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           agent: messagesUrl.startsWith('https:') ? httpsAgent : undefined
         });
         
+        console.log('[MCP] Initialize request sent, waiting for response...');
         // NO enviamos main request aquí - esperamos respuesta de initialize
         
       } catch (e) {
+        console.log('[MCP] Error sending initialize:', e);
         cleanup();
         clearTimeout(timeout);
         reject(e);
@@ -139,21 +145,35 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
     // Handle message responses
     es.onmessage = (ev: any) => {
       try {
+        console.log('[MCP] SSE message received:', ev.data);
         const json = JSON.parse(ev.data);
         
         // Initialize response - now send main request
         if (json?.id === initId) {
+          console.log('[MCP] Initialize response received, sending main request');
           void sendMainRequest();
           return;
         }
         
         // Main response
-        if (json?.id === requestId || json?.result !== undefined || json?.error !== undefined) {
+        if (json?.id === requestId) {
+          console.log('[MCP] Main response received');
+          cleanup();
+          clearTimeout(timeout);
+          resolve(json);
+          return;
+        }
+        
+        // Generic response fallback
+        if (json?.result !== undefined || json?.error !== undefined) {
+          console.log('[MCP] Generic response received');
           cleanup();
           clearTimeout(timeout);
           resolve(json);
         }
-      } catch {}
+      } catch (e) {
+        console.log('[MCP] Error parsing SSE message:', e);
+      }
     };
     
     es.onerror = () => {
