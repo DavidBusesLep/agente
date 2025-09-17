@@ -210,13 +210,24 @@ async function mcpRpcTry(candidates: string[], body: any, headers: Record<string
 async function mcpListTools(serverUrl: string, headers: Record<string, string> = {}): Promise<McpTool[]> {
   try {
     if (isSseUrl(serverUrl)) {
-      // Use EXACT format from your working example
-      const json = await mcpSseRequest(serverUrl, { 
-        jsonrpc: '2.0', 
-        id: 2, // número, no string
-        method: 'tools/list',
-        params: {} // objeto vacío
-      }, headers);
+      // Try without params first
+      let json;
+      try {
+        json = await mcpSseRequest(serverUrl, { 
+          jsonrpc: '2.0', 
+          id: 2,
+          method: 'tools/list'
+          // No params field at all
+        }, headers);
+      } catch (e) {
+        // Fallback: try with empty params
+        json = await mcpSseRequest(serverUrl, { 
+          jsonrpc: '2.0', 
+          id: 2,
+          method: 'tools/list',
+          params: {}
+        }, headers);
+      }
       return json?.result?.tools ?? [];
     }
     const candidates = buildMcpCandidates(serverUrl);
