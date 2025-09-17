@@ -451,6 +451,7 @@ const AiAnswerRequestSchema = z.object({
   system: z.object({ prompt: z.string().min(1), policies: z.object({ temperature: z.number().min(0).max(2).default(0.2), max_tokens: z.number().int().positive().max(4000).default(500) }) }),
   conversation: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string() })).min(1),
   mcp_servers: z.array(z.object({ name: z.string(), url: z.string().url(), headers: z.record(z.string()).optional(), session_id: z.string().optional() })).default([]),
+  webhook_tools: z.array(z.object({ name: z.string(), base_url: z.string().url(), headers: z.record(z.string()).optional() })).default([]),
   model: z.string().min(1)
 });
 
@@ -465,20 +466,41 @@ app.post('/ai/answer', async (req, reply) => {
     return;
   }
 
-  // 3. Discover MCP tools
+  // 3. Discover tools (webhook + MCP)
   const allTools: McpTool[] = [];
+  
+  // A) Simple webhook tools
+  console.log('[WEBHOOK] Attempting to discover tools from', parsed.webhook_tools.length, 'webhook servers');
+  for (const srv of parsed.webhook_tools) {
+    try {
+      const res = await fetch(`${srv.base_url}/tools/list`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...srv.headers },
+        body: JSON.stringify({})
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const tools = data.tools || [];
+        console.log('[WEBHOOK] Discovered', tools.length, 'tools from', srv.name);
+        allTools.push(...tools.map((t: any) => ({ ...t, name: `${srv.name}.${t.name}`, source: 'webhook', baseUrl: srv.base_url, headers: srv.headers })));
+      }
+    } catch (e) {
+      console.log('[WEBHOOK] Failed to get tools from', srv.name, ':', e);
+    }
+  }
+  
+  // B) MCP tools (if any)
   console.log('[MCP] Attempting to discover tools from', parsed.mcp_servers.length, 'servers');
   for (const srv of parsed.mcp_servers) {
     try {
       const tools = await mcpListTools(srv.url, srv.headers ?? {});
       console.log('[MCP] Discovered', tools.length, 'tools from', srv.name);
-      allTools.push(...tools.map(t => ({ ...t, name: `${srv.name}.${t.name}` })));
+      allTools.push(...tools.map(t => ({ ...t, name: `${srv.name}.${t.name}`, source: 'mcp' })));
     } catch (e) {
       console.log('[MCP] Failed to get tools from', srv.name, ':', e);
-      // Continue without tools from this server
     }
   }
-  console.log('[MCP] Total tools available:', allTools.length);
+  console.log('[TOTAL] Tools available:', allTools.length);
 
   // 4. Build messages
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
@@ -525,10 +547,36 @@ app.post('/ai/answer', async (req, reply) => {
     for (const call of toolCalls) {
       const name = call.function?.name as string;
       const [serverName, toolLocal] = name.split('.', 2);
-      const srv = parsed.mcp_servers.find(s => s.name === serverName);
-      if (!srv) continue;
       const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
-      const result = await mcpCallTool(srv.url, toolLocal, args, srv.headers ?? {}, srv.session_id);
+      
+      // Find tool source
+      const tool = allTools.find(t => t.name === name);
+      let result;
+      
+      if (tool?.source === 'webhook') {
+        // Simple webhook call
+        try {
+          const res = await fetch(`${tool.baseUrl}/tools/call`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...tool.headers },
+            body: JSON.stringify({ name: toolLocal, arguments: args })
+          });
+          result = res.ok ? await res.json() : { error: 'Webhook call failed' };
+        } catch (e) {
+          result = { error: String(e) };
+        }
+      } else {
+        // MCP call (legacy)
+        const srv = parsed.mcp_servers.find(s => s.name === serverName);
+        if (srv) {
+          try {
+            result = await mcpCallTool(srv.url, toolLocal, args, srv.headers ?? {});
+          } catch (e) {
+            result = { error: String(e) };
+          }
+        }
+      }
+      
       messages.push({ role: 'tool', content: JSON.stringify({ tool: name, result }) } as any);
     }
     // 7. Final response after tools
