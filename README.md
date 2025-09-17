@@ -32,7 +32,7 @@ npm run dev
 ```bash
 curl -X POST http://localhost:3000/ai/answer \
   -H "content-type: application/json" \
-  -H "x-api-key: TU_API_KEY" \
+  -H "x-api-key: 70896384d04f4ff08e54ab60b63765220d4fe6581a924" \
   -d '{
     "system": { "prompt": "Eres un asistente útil", "policies": { "temperature": 0.2, "max_tokens": 200 } },
     "conversation": [ { "role": "user", "content": "Hola, ¿puedes resumir esto?" } ],
