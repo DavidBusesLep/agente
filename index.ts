@@ -155,8 +155,8 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           return;
         }
         
-        // Main response
-        if (json?.id === 2) { // Match static ID for tools/list
+        // Main response (handle both string and number IDs)
+        if (json?.id === 2 || json?.id === "2") { // Match static ID for tools/list
           console.log('[MCP] Main response received');
           cleanup();
           clearTimeout(timeout);
@@ -450,15 +450,20 @@ app.post('/ai/answer', async (req, reply) => {
     return;
   }
 
-  // 3. Discover MCP tools (temporarily skip to test basic flow)
+  // 3. Discover MCP tools
   const allTools: McpTool[] = [];
-  console.log('[MCP] Skipping tool discovery for now - testing basic AI flow');
-  /*
+  console.log('[MCP] Attempting to discover tools from', parsed.mcp_servers.length, 'servers');
   for (const srv of parsed.mcp_servers) {
-    const tools = await mcpListTools(srv.url, srv.headers ?? {});
-    allTools.push(...tools.map(t => ({ ...t, name: `${srv.name}.${t.name}` })));
+    try {
+      const tools = await mcpListTools(srv.url, srv.headers ?? {});
+      console.log('[MCP] Discovered', tools.length, 'tools from', srv.name);
+      allTools.push(...tools.map(t => ({ ...t, name: `${srv.name}.${t.name}` })));
+    } catch (e) {
+      console.log('[MCP] Failed to get tools from', srv.name, ':', e);
+      // Continue without tools from this server
+    }
   }
-  */
+  console.log('[MCP] Total tools available:', allTools.length);
 
   // 4. Build messages
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
