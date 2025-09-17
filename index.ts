@@ -85,7 +85,7 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           method: 'POST',
           headers: { 'content-type': 'application/json', ...headers },
           body: JSON.stringify(body),
-          agent: messagesUrl.startsWith('https:') ? httpsAgent : undefined
+          agent: messagesUrl.startsWith('http:') ? httpsAgent : undefined
         });
         console.log('[MCP] Main request sent, waiting for response...');
       } catch (e) {
@@ -119,7 +119,7 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           method: 'POST',
           headers: { 'content-type': 'application/json', ...headers },
           body: JSON.stringify(initBody),
-          agent: messagesUrl.startsWith('https:') ? httpsAgent : undefined
+          agent: messagesUrl.startsWith('http:') ? httpsAgent : undefined
         });
         
         console.log('[MCP] Initialize request sent, waiting for response...');
