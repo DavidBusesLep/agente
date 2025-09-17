@@ -450,12 +450,15 @@ app.post('/ai/answer', async (req, reply) => {
     return;
   }
 
-  // 3. Discover MCP tools
+  // 3. Discover MCP tools (temporarily skip to test basic flow)
   const allTools: McpTool[] = [];
+  console.log('[MCP] Skipping tool discovery for now - testing basic AI flow');
+  /*
   for (const srv of parsed.mcp_servers) {
-    const tools = await mcpListTools(srv.url, srv.headers ?? {}, srv.session_id);
+    const tools = await mcpListTools(srv.url, srv.headers ?? {});
     allTools.push(...tools.map(t => ({ ...t, name: `${srv.name}.${t.name}` })));
   }
+  */
 
   // 4. Build messages
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
