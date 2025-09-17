@@ -207,10 +207,22 @@ async function mcpRpcTry(candidates: string[], body: any, headers: Record<string
   throw lastError ?? new Error('All MCP endpoints failed');
 }
 
-async function mcpListTools(serverUrl: string, headers: Record<string, string> = {}): Promise<McpTool[]> {
+async function mcpListTools(serverUrl: string, headers: Record<string, string> = {}, mode: 'sse' | 'http' = 'sse'): Promise<McpTool[]> {
   try {
+    if (mode === 'http') {
+      // Direct HTTP JSON-RPC (no SSE)
+      const baseUrl = serverUrl.replace(/\/?sse$/, '');
+      const json = await mcpRpcTry([baseUrl + '/jsonrpc', baseUrl + '/rpc', baseUrl], { 
+        jsonrpc: '2.0', 
+        id: 2,
+        method: 'tools/list',
+        params: {}
+      }, headers);
+      return json?.result?.tools ?? [];
+    }
+    
     if (isSseUrl(serverUrl)) {
-      // Try without params first
+      // SSE mode (existing logic)
       let json;
       try {
         json = await mcpSseRequest(serverUrl, { 
@@ -238,7 +250,20 @@ async function mcpListTools(serverUrl: string, headers: Record<string, string> =
   }
 }
 
-async function mcpCallTool(serverUrl: string, toolName: string, args: unknown, headers: Record<string, string> = {}): Promise<unknown> {
+async function mcpCallTool(serverUrl: string, toolName: string, args: unknown, headers: Record<string, string> = {}, mode: 'sse' | 'http' = 'sse'): Promise<unknown> {
+  if (mode === 'http') {
+    // Direct HTTP JSON-RPC (no SSE)
+    const baseUrl = serverUrl.replace(/\/?sse$/, '');
+    const json = await mcpRpcTry([baseUrl + '/jsonrpc', baseUrl + '/rpc', baseUrl], { 
+      jsonrpc: '2.0', 
+      id: 3,
+      method: 'tools/call', 
+      params: { name: toolName, arguments: args } 
+    }, headers);
+    if (json.error) throw new Error(json.error.message ?? 'MCP tool call failed');
+    return json.result;
+  }
+  
   if (isSseUrl(serverUrl)) {
     const json = await mcpSseRequest(serverUrl, { jsonrpc: '2.0', id: randomUUID(), method: 'tools/call', params: { name: toolName, arguments: args } }, headers);
     if (json.error) throw new Error(json.error.message ?? 'MCP tool call failed');
@@ -450,7 +475,7 @@ app.post('/tenants/register', async (req, reply) => {
 const AiAnswerRequestSchema = z.object({
   system: z.object({ prompt: z.string().min(1), policies: z.object({ temperature: z.number().min(0).max(2).default(0.2), max_tokens: z.number().int().positive().max(4000).default(500) }) }),
   conversation: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string() })).min(1),
-  mcp_servers: z.array(z.object({ name: z.string(), url: z.string().url(), headers: z.record(z.string()).optional(), session_id: z.string().optional() })).default([]),
+  mcp_servers: z.array(z.object({ name: z.string(), url: z.string().url(), headers: z.record(z.string()).optional(), session_id: z.string().optional(), mode: z.enum(['sse', 'http']).default('sse') })).default([]),
   webhook_tools: z.array(z.object({ name: z.string(), base_url: z.string().url(), headers: z.record(z.string()).optional() })).default([]),
   model: z.string().min(1)
 });
@@ -493,11 +518,11 @@ app.post('/ai/answer', async (req, reply) => {
   console.log('[MCP] Attempting to discover tools from', parsed.mcp_servers.length, 'servers');
   for (const srv of parsed.mcp_servers) {
     try {
-      const tools = await mcpListTools(srv.url, srv.headers ?? {});
-      console.log('[MCP] Discovered', tools.length, 'tools from', srv.name);
-      allTools.push(...tools.map(t => ({ ...t, name: `${srv.name}.${t.name}`, source: 'mcp' })));
+      const tools = await mcpListTools(srv.url, srv.headers ?? {}, srv.mode);
+      console.log(`[MCP-${srv.mode.toUpperCase()}] Discovered`, tools.length, 'tools from', srv.name);
+      allTools.push(...tools.map(t => ({ ...t, name: `${srv.name}.${t.name}`, source: 'mcp', mode: srv.mode })));
     } catch (e) {
-      console.log('[MCP] Failed to get tools from', srv.name, ':', e);
+      console.log(`[MCP-${srv.mode.toUpperCase()}] Failed to get tools from`, srv.name, ':', e);
     }
   }
   console.log('[TOTAL] Tools available:', allTools.length);
@@ -566,11 +591,11 @@ app.post('/ai/answer', async (req, reply) => {
           result = { error: String(e) };
         }
       } else {
-        // MCP call (legacy)
+        // MCP call (SSE or HTTP)
         const srv = parsed.mcp_servers.find(s => s.name === serverName);
         if (srv) {
           try {
-            result = await mcpCallTool(srv.url, toolLocal, args, srv.headers ?? {});
+            result = await mcpCallTool(srv.url, toolLocal, args, srv.headers ?? {}, srv.mode);
           } catch (e) {
             result = { error: String(e) };
           }
