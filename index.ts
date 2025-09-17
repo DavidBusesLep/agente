@@ -101,7 +101,7 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
         initId = `init-${requestId}`;
         const initBody = {
           jsonrpc: '2.0',
-          id: initId,
+          id: 1, // Use static ID like in your example
           method: 'initialize',
           params: {
             protocolVersion: '1.0',
@@ -149,14 +149,14 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
         const json = JSON.parse(ev.data);
         
         // Initialize response - now send main request
-        if (json?.id === initId) {
+        if (json?.id === 1) { // Match static ID
           console.log('[MCP] Initialize response received, sending main request');
           void sendMainRequest();
           return;
         }
         
         // Main response
-        if (json?.id === requestId) {
+        if (json?.id === 2) { // Match static ID for tools/list
           console.log('[MCP] Main response received');
           cleanup();
           clearTimeout(timeout);
@@ -206,14 +206,13 @@ async function mcpRpcTry(candidates: string[], body: any, headers: Record<string
 async function mcpListTools(serverUrl: string, headers: Record<string, string> = {}): Promise<McpTool[]> {
   try {
     if (isSseUrl(serverUrl)) {
-      // Try different parameter formats
-      let json;
-      try {
-        json = await mcpSseRequest(serverUrl, { jsonrpc: '2.0', id: randomUUID(), method: 'tools/list', params: {} }, headers);
-      } catch (e) {
-        // Try without params if empty object fails
-        json = await mcpSseRequest(serverUrl, { jsonrpc: '2.0', id: randomUUID(), method: 'tools/list' }, headers);
-      }
+      // Use exact format from your working example
+      const json = await mcpSseRequest(serverUrl, { 
+        jsonrpc: '2.0', 
+        id: 2, // Use static ID like in your example
+        method: 'tools/list', 
+        params: {} 
+      }, headers);
       return json?.result?.tools ?? [];
     }
     const candidates = buildMcpCandidates(serverUrl);
