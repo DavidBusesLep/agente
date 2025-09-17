@@ -210,9 +210,28 @@ async function mcpRpcTry(candidates: string[], body: any, headers: Record<string
 async function mcpListTools(serverUrl: string, headers: Record<string, string> = {}, mode: 'sse' | 'http' = 'sse'): Promise<McpTool[]> {
   try {
     if (mode === 'http') {
-      // Direct HTTP JSON-RPC (no SSE)
+      // Direct HTTP JSON-RPC (no SSE) - need to initialize first
       const baseUrl = serverUrl.replace(/\/?sse$/, '');
-      const json = await mcpRpcTry([baseUrl + '/jsonrpc', baseUrl + '/rpc', baseUrl], { 
+      const endpoints = [baseUrl + '/rpc', baseUrl + '/jsonrpc', baseUrl];
+      
+      // 1. Initialize first
+      try {
+        await mcpRpcTry(endpoints, {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-06-18',
+            clientInfo: { name: 'test', version: '0.1.0' },
+            capabilities: { tools: {} }
+          }
+        }, headers);
+      } catch (e) {
+        console.log('[MCP-HTTP] Initialize failed:', e);
+      }
+      
+      // 2. List tools
+      const json = await mcpRpcTry(endpoints, { 
         jsonrpc: '2.0', 
         id: 2,
         method: 'tools/list',
