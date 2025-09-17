@@ -71,6 +71,24 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
       reject(new Error('MCP timeout'));
     }, 30000);
     
+    const sendMainRequest = async () => {
+      if (mainSent || !messagesUrl) return;
+      mainSent = true;
+      
+      try {
+        await fetch(messagesUrl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...headers },
+          body: JSON.stringify(body),
+          agent: messagesUrl.startsWith('https:') ? httpsAgent : undefined
+        });
+      } catch (e) {
+        cleanup();
+        clearTimeout(timeout);
+        reject(e);
+      }
+    };
+
     const sendRequests = async () => {
       if (!messagesUrl || initSent) return;
       initSent = true;
@@ -96,18 +114,7 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           agent: messagesUrl.startsWith('https:') ? httpsAgent : undefined
         });
         
-        // Wait for init response before sending main request
-        setTimeout(async () => {
-          if (!mainSent) {
-            mainSent = true;
-            await fetch(messagesUrl!, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json', ...headers },
-              body: JSON.stringify(body),
-              agent: messagesUrl!.startsWith('https:') ? httpsAgent : undefined
-            });
-          }
-        }, 2000);
+        // NO enviamos main request aquí - esperamos respuesta de initialize
         
       } catch (e) {
         cleanup();
@@ -134,8 +141,9 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
       try {
         const json = JSON.parse(ev.data);
         
-        // Skip init response
+        // Initialize response - now send main request
         if (json?.id === initId) {
+          void sendMainRequest();
           return;
         }
         
