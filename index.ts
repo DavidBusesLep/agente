@@ -77,6 +77,7 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
       
       try {
         console.log('[MCP] Sending main request with ID: 2');
+        console.log('[MCP] Request body:', JSON.stringify(body));
         await fetch(messagesUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...headers },
