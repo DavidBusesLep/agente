@@ -85,7 +85,7 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           method: 'POST',
           headers: { 'content-type': 'application/json', ...headers },
           body: JSON.stringify(body),
-          agent: messagesUrl.startsWith('http:') ? httpsAgent : undefined
+          agent: messagesUrl.startsWith('https:') ? httpsAgent : undefined
         });
         console.log('[MCP] Main request sent, waiting for response...');
       } catch (e) {
@@ -119,7 +119,7 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           method: 'POST',
           headers: { 'content-type': 'application/json', ...headers },
           body: JSON.stringify(initBody),
-          agent: messagesUrl.startsWith('http:') ? httpsAgent : undefined
+          agent: messagesUrl.startsWith('https:') ? httpsAgent : undefined
         });
         
         console.log('[MCP] Initialize request sent, waiting for response...');
@@ -210,11 +210,11 @@ async function mcpRpcTry(candidates: string[], body: any, headers: Record<string
 async function mcpListTools(serverUrl: string, headers: Record<string, string> = {}, mode: 'sse' | 'http' = 'sse'): Promise<McpTool[]> {
   try {
     if (mode === 'http') {
-      // Direct HTTP JSON-RPC (no SSE) - need to initialize first
+      // Direct HTTP JSON-RPC (no SSE)
       const baseUrl = serverUrl.replace(/\/?sse$/, '');
-      const endpoints = [baseUrl + '/rpc', baseUrl + '/jsonrpc', baseUrl];
+      const endpoints = [baseUrl + '/rpc', baseUrl + '/', baseUrl + '/jsonrpc', baseUrl];
       
-      // 1. Initialize first
+      // 1. Initialize first (required for your server)
       try {
         await mcpRpcTry(endpoints, {
           jsonrpc: '2.0',
@@ -222,10 +222,11 @@ async function mcpListTools(serverUrl: string, headers: Record<string, string> =
           method: 'initialize',
           params: {
             protocolVersion: '2025-06-18',
-            clientInfo: { name: 'test', version: '0.1.0' },
+            clientInfo: { name: 'ai-orchestrator', version: '0.1.0' },
             capabilities: { tools: {} }
           }
         }, headers);
+        console.log('[MCP-HTTP] Initialized successfully');
       } catch (e) {
         console.log('[MCP-HTTP] Initialize failed:', e);
       }
@@ -273,7 +274,8 @@ async function mcpCallTool(serverUrl: string, toolName: string, args: unknown, h
   if (mode === 'http') {
     // Direct HTTP JSON-RPC (no SSE)
     const baseUrl = serverUrl.replace(/\/?sse$/, '');
-    const json = await mcpRpcTry([baseUrl + '/jsonrpc', baseUrl + '/rpc', baseUrl], { 
+    const endpoints = [baseUrl + '/rpc', baseUrl + '/', baseUrl + '/jsonrpc', baseUrl];
+    const json = await mcpRpcTry(endpoints, { 
       jsonrpc: '2.0', 
       id: 3,
       method: 'tools/call', 
