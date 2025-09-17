@@ -76,7 +76,7 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
       mainSent = true;
       
       try {
-        console.log('[MCP] Sending main request with ID: "2"');
+        console.log('[MCP] Sending main request with ID: 2');
         await fetch(messagesUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json', ...headers },
@@ -101,11 +101,11 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
         initId = `init-${requestId}`;
         const initBody = {
           jsonrpc: '2.0',
-          id: 1, // Use static ID like in your example
+          id: 1, // número, no string
           method: 'initialize',
           params: {
             protocolVersion: '2025-06-18',
-            clientInfo: { name: 'ai-orchestrator', version: '0.1.0' },
+            clientInfo: { name: 'test', version: '0.1.0' },
             capabilities: { tools: {}, prompts: {}, resources: {} }
           }
         };
@@ -155,8 +155,8 @@ async function mcpHttpOnlyRequest(serverUrl: string, body: any, headers: Record<
           return;
         }
         
-        // Main response (handle both string and number IDs)
-        if (json?.id === 2 || json?.id === "2") { // Match static ID for tools/list
+        // Main response (number ID)
+        if (json?.id === 2) { // Match número ID for tools/list
           console.log('[MCP] Main response received');
           cleanup();
           clearTimeout(timeout);
@@ -206,12 +206,12 @@ async function mcpRpcTry(candidates: string[], body: any, headers: Record<string
 async function mcpListTools(serverUrl: string, headers: Record<string, string> = {}): Promise<McpTool[]> {
   try {
     if (isSseUrl(serverUrl)) {
-      // Use exact format - no params field at all
+      // Use EXACT format from your working example
       const json = await mcpSseRequest(serverUrl, { 
         jsonrpc: '2.0', 
-        id: "2", 
-        method: 'tools/list'
-        // NO params field
+        id: 2, // número, no string
+        method: 'tools/list',
+        params: {} // objeto vacío
       }, headers);
       return json?.result?.tools ?? [];
     }
