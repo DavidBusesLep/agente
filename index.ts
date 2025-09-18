@@ -92,6 +92,7 @@ async function createChatCompletionAdaptive(params: any) {
 
 const app = Fastify({ logger: true });
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? 'admin';
 
 // Static files
 await app.register(fastifyStatic, {
@@ -139,6 +140,20 @@ app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
   req.tenant = tenant;
 });
 
+// Admin guard for /api/admin/*
+app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
+  if (!req.url || !req.url.startsWith('/api/admin')) return;
+  const path = req.url.split('?')[0];
+  if (path === '/api/admin/login' || path === '/api/admin/check') {
+    return; // permitir login y verificación sin cookie
+  }
+  const isAdmin = (req as any).cookies?.admin_auth === '1';
+  if (!isAdmin) {
+    reply.code(401).send({ error: 'Unauthorized' });
+    return;
+  }
+});
+
 // Auth endpoints (signup/login)
 app.post('/auth/signup', async (req, reply) => {
   const bodySchema = z.object({
@@ -152,7 +167,7 @@ app.post('/auth/signup', async (req, reply) => {
   const apiKey = generateApiKey();
   const hashed = await (await import('argon2')).hash(body.password);
   const created = await prisma.$transaction(async tx => {
-    const tenant = await tx.tenant.create({ data: { name: body.tenantName, apikey: apiKey, balance: new Prisma.Decimal(0) } });
+    const tenant = await tx.tenant.create({ data: { name: body.tenantName, apikey: apiKey, balance: new Prisma.Decimal(0), toolsEnabled: false } });
     const user = await tx.user.create({ data: { tenantId: tenant.id, email: body.email, passwordHash: hashed, role: 'admin' } });
     await tx.settings.create({
       data: {
@@ -193,7 +208,7 @@ app.post('/auth/logout', async (_req, reply) => {
 // Dashboard APIs
 app.get('/api/me', { preHandler: authGuard }, async (req: any, reply) => {
   const { tid, uid } = req.user as { tid: string; uid: string };
-  const tenant = await prisma.tenant.findUnique({ where: { id: tid }, select: { id: true, name: true, apikey: true, balance: true } });
+  const tenant = await prisma.tenant.findUnique({ where: { id: tid }, select: { id: true, name: true, apikey: true, balance: true, toolsEnabled: true } });
   const user = await prisma.user.findUnique({ where: { id: uid }, select: { id: true, email: true, role: true } });
   const settings = await prisma.settings.findUnique({ where: { tenantId: tid }, select: { modelDefault: true, aiEndpointUrl: true, aiForwardApiKey: true } });
   reply.send({ tenant, user, settings });
@@ -255,6 +270,40 @@ app.get('/api/models', { preHandler: authGuard }, async (_req: any, reply) => {
   reply.send({ models });
 });
 
+// Admin: lista de tenants y toggle de toolsEnabled (simple, sin auth fuerte)
+app.get('/api/admin/tenants', async (_req, reply) => {
+  const tenants = await prisma.tenant.findMany({ select: { id: true, name: true, balance: true, toolsEnabled: true } });
+  reply.send({ tenants });
+});
+
+app.post('/api/admin/tenants/tools-toggle', async (req, reply) => {
+  const body = (z.object({ tenantId: z.string().min(1), enable: z.boolean() })).parse(req.body);
+  const updated = await prisma.tenant.update({ where: { id: body.tenantId }, data: { toolsEnabled: body.enable }, select: { id: true, toolsEnabled: true } });
+  reply.send(updated);
+});
+
+// Admin auth endpoints
+app.get('/api/admin/check', async (req, reply) => {
+  const isAdmin = (req as any).cookies?.admin_auth === '1';
+  if (!isAdmin) return reply.code(401).send({ error: 'Unauthorized' });
+  reply.send({ ok: true });
+});
+
+app.post('/api/admin/login', async (req, reply) => {
+  const body = (z.object({ password: z.string().min(1) })).parse(req.body);
+  if (body.password !== ADMIN_PASSWORD) {
+    reply.code(401).send({ error: 'Invalid password' });
+    return;
+  }
+  reply.setCookie('admin_auth', '1', { httpOnly: true, sameSite: 'lax', path: '/' });
+  reply.send({ ok: true });
+});
+
+app.post('/api/admin/logout', async (_req, reply) => {
+  reply.clearCookie('admin_auth', { path: '/' });
+  reply.send({ ok: true });
+});
+
 // Tenant registration
 app.post('/tenants/register', async (req, reply) => {
   const bodySchema = z.object({ name: z.string().min(2), initial_balance: z.number().nonnegative().default(0).optional() });
@@ -299,6 +348,9 @@ app.post('/ai/answer', async (req, reply) => {
 
   // Load settings for tenant
   const settings = await prisma.settings.findUnique({ where: { tenantId: tenant.id } });
+  // Verificar si las tools están habilitadas para decidir si exponerlas o no
+  const tenantToolsEnabled = await prisma.tenant.findUnique({ where: { id: tenant.id }, select: { toolsEnabled: true } });
+  const toolsAllowed = !!tenantToolsEnabled?.toolsEnabled;
   const systemPrompt = settings?.systemPrompt ?? 'Eres un asistente útil, tu nombre es mirlo';
   const temperature = settings?.temperature ?? 0.7;
   const maxTokens = settings?.maxTokens ?? 1000;
@@ -342,8 +394,8 @@ app.post('/ai/answer', async (req, reply) => {
     return;
   }
 
-  // 5. Loop de function calling: ejecutar todas las tools necesarias (límite de rondas)
-  const toolDefs = getOpenAiToolDefs();
+  // 5. Loop de function calling: ejecutar tools solo si están habilitadas
+  const toolDefs = toolsAllowed ? getOpenAiToolDefs() : [];
   let messages = [...baseMessages];
   let assistantMessage: any = null;
   const traceLog: any[] = [];

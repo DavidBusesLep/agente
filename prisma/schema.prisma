@@ -15,6 +15,7 @@ model Tenant {
   apikey    String  @unique @map("apikey")
   balance   Decimal @default(0) @map("balance")
   createdAt DateTime @default(now()) @map("created_at")
+  toolsEnabled Boolean @default(false) @map("tools_enabled")
 
   users     User[]
   usageLogs UsageLog[]
