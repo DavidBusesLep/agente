@@ -19,6 +19,7 @@ model Tenant {
   users     User[]
   usageLogs UsageLog[]
   payments  Payment[]
+  settings  Settings?
 
   @@map("tenants")
 }
@@ -80,6 +81,22 @@ model Payment {
 
   @@index([tenantId])
   @@map("payments")
+}
+
+// Tenant settings for assistant system prompt and policies
+model Settings {
+  id           String  @id @default(cuid()) @map("id")
+  tenantId     String  @unique @map("tenant_id")
+  systemPrompt String  @map("system_prompt")
+  temperature  Float   @default(0.2) @map("temperature")
+  maxTokens    Int     @default(500) @map("max_tokens")
+  modelDefault String? @map("model_default")
+  aiEndpointUrl String? @map("ai_endpoint_url")
+  aiForwardApiKey String? @map("ai_forward_api_key")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("settings")
 }
 
 

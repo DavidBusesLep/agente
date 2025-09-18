@@ -154,6 +154,17 @@ app.post('/auth/signup', async (req, reply) => {
   const created = await prisma.$transaction(async tx => {
     const tenant = await tx.tenant.create({ data: { name: body.tenantName, apikey: apiKey, balance: new Prisma.Decimal(0) } });
     const user = await tx.user.create({ data: { tenantId: tenant.id, email: body.email, passwordHash: hashed, role: 'admin' } });
+    await tx.settings.create({
+      data: {
+        tenantId: tenant.id,
+        systemPrompt: 'Eres un asistente útil, tu nombre es mirlo',
+        temperature: 0.7,
+        maxTokens: 1000,
+        modelDefault: 'gpt-4.1-mini',
+        aiEndpointUrl: 'http://181.117.6.16:3000/ai/answer',
+        aiForwardApiKey: ''
+      }
+    });
     return { tenant, user };
   });
 
@@ -184,7 +195,8 @@ app.get('/api/me', { preHandler: authGuard }, async (req: any, reply) => {
   const { tid, uid } = req.user as { tid: string; uid: string };
   const tenant = await prisma.tenant.findUnique({ where: { id: tid }, select: { id: true, name: true, apikey: true, balance: true } });
   const user = await prisma.user.findUnique({ where: { id: uid }, select: { id: true, email: true, role: true } });
-  reply.send({ tenant, user });
+  const settings = await prisma.settings.findUnique({ where: { tenantId: tid }, select: { modelDefault: true, aiEndpointUrl: true, aiForwardApiKey: true } });
+  reply.send({ tenant, user, settings });
 });
 
 app.get('/api/usage', { preHandler: authGuard }, async (req: any, reply) => {
@@ -198,6 +210,49 @@ app.post('/api/regenerate-key', { preHandler: authGuard }, async (req: any, repl
   const newKey = generateApiKey();
   const updated = await prisma.tenant.update({ where: { id: tid }, data: { apikey: newKey }, select: { apikey: true } });
   reply.send(updated);
+});
+
+// Settings endpoints
+app.get('/api/settings', { preHandler: authGuard }, async (req: any, reply) => {
+  const { tid } = req.user as { tid: string };
+  const settings = await prisma.settings.findUnique({ where: { tenantId: tid } });
+  reply.send({ settings });
+});
+
+app.post('/api/settings', { preHandler: authGuard }, async (req: any, reply) => {
+  const { tid } = req.user as { tid: string };
+  const bodySchema = z.object({
+    systemPrompt: z.string().min(1).optional(),
+    temperature: z.number().min(0).max(2).optional(),
+    maxTokens: z.number().int().positive().max(4000).optional(),
+    modelDefault: z.string().min(1).optional(),
+    aiEndpointUrl: z.string().url().optional(),
+    aiForwardApiKey: z.string().optional()
+  });
+  const body = bodySchema.parse(req.body);
+  const defaults = {
+    systemPrompt: 'Eres un asistente útil, tu nombre es mirlo',
+    temperature: 0.7,
+    maxTokens: 1000,
+    modelDefault: 'gpt-4.1-mini',
+    aiEndpointUrl: 'http://181.117.6.16:3000/ai/answer',
+    aiForwardApiKey: ''
+  };
+  const updated = await prisma.settings.upsert({
+    where: { tenantId: tid },
+    update: body,
+    create: { tenantId: tid, ...defaults, ...body }
+  });
+  reply.send({ settings: updated });
+});
+
+// Lista de modelos activos
+app.get('/api/models', { preHandler: authGuard }, async (_req: any, reply) => {
+  const models = await prisma.model.findMany({
+    where: { isActive: true },
+    select: { name: true, provider: true, inputCostPerMillion: true, outputCostPerMillion: true }
+  });
+  reply.send({ models });
 });
 
 // Tenant registration
@@ -216,9 +271,8 @@ app.post('/tenants/register', async (req, reply) => {
   reply.send(created);
 });
 
-// Input schema para /ai/answer
+// Input schema para /ai/answer (system se toma de Settings del tenant)
 const AiAnswerRequestSchema = z.object({
-  system: z.object({ prompt: z.string().min(1), policies: z.object({ temperature: z.number().min(0).max(2).default(0.2), max_tokens: z.number().int().positive().max(4000).default(500) }) }),
   conversation: z.array(z.object({
     role: z.enum(['user', 'assistant']),
     content: z.string(),
@@ -228,7 +282,7 @@ const AiAnswerRequestSchema = z.object({
       result: z.unknown().optional()
     })).optional()
   })).min(1),
-  model: z.string().min(1),
+  model: z.string().min(1).optional(),
   trace: z.boolean().optional().default(false),
   context_tools: z.array(z.object({
     name: z.string(),
@@ -243,8 +297,15 @@ app.post('/ai/answer', async (req, reply) => {
   const parsed = AiAnswerRequestSchema.parse(req.body);
   const tenant = req.tenant!;
 
-  // 1-2. Validate model
-  const model = await prisma.model.findFirst({ where: { name: parsed.model, isActive: true } });
+  // Load settings for tenant
+  const settings = await prisma.settings.findUnique({ where: { tenantId: tenant.id } });
+  const systemPrompt = settings?.systemPrompt ?? 'Eres un asistente útil, tu nombre es mirlo';
+  const temperature = settings?.temperature ?? 0.7;
+  const maxTokens = settings?.maxTokens ?? 1000;
+
+  // 1-2. Validate model (use settings default if not provided)
+  const modelName = parsed.model ?? settings?.modelDefault ?? 'gpt-4.1-mini';
+  const model = await prisma.model.findFirst({ where: { name: modelName, isActive: true } });
   if (!model) {
     reply.code(400).send({ error: 'Modelo no disponible' });
     return;
@@ -262,7 +323,7 @@ app.post('/ai/answer', async (req, reply) => {
   });
 
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-    { role: 'system', content: parsed.system.prompt },
+    { role: 'system', content: systemPrompt },
     ...(parsed.context_tools && parsed.context_tools.length
       ? [{ role: 'system', content: `Contexto de herramientas previas: ${JSON.stringify(parsed.context_tools)}` } as any]
       : []),
@@ -271,7 +332,7 @@ app.post('/ai/answer', async (req, reply) => {
 
   // Pre-cost estimation to enforce 402 before calling the model
   const estInTokens = estimateMessagesTokens(baseMessages);
-  const estOutTokens = parsed.system.policies.max_tokens;
+  const estOutTokens = maxTokens;
   const estimatedCost =
     (estInTokens * Number(model.inputCostPerMillion)) / 1_000_000 +
     (estOutTokens * Number(model.outputCostPerMillion)) / 1_000_000;
@@ -291,8 +352,8 @@ app.post('/ai/answer', async (req, reply) => {
     const resp = await createChatCompletionAdaptive({
       model: model.name,
       messages,
-      temperature: parsed.system.policies.temperature,
-      max_tokens: parsed.system.policies.max_tokens,
+      temperature: temperature,
+      max_tokens: maxTokens,
       tools: toolDefs.length ? toolDefs : undefined
     });
     assistantMessage = resp.choices[0]?.message;

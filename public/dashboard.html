@@ -13,6 +13,36 @@
         <button id="logout" class="text-sm text-red-600">Cerrar sesión</button>
       </div>
       <div id="info" class="grid md:grid-cols-3 gap-4 mb-8"></div>
+
+      <!-- Configuración de IA por tenant -->
+      <div class="bg-white rounded shadow p-4 mb-8">
+        <h2 class="text-lg font-semibold mb-4">Configuración de IA</h2>
+        <div class="grid md:grid-cols-2 gap-4">
+          <div>
+            <label class="text-sm text-gray-600">Modelo por defecto</label>
+            <select id="settings-model" class="w-full mt-1 border rounded px-3 py-2"></select>
+          </div>
+          <div class="md:col-span-2">
+            <div id="model-costs" class="text-sm text-gray-700 bg-gray-50 border rounded px-3 py-2"></div>
+          </div>
+          <div>
+            <label class="text-sm text-gray-600">Temperatura</label>
+            <input id="settings-temp" type="number" step="0.1" min="0" max="2" class="w-full mt-1 border rounded px-3 py-2" placeholder="0.7">
+          </div>
+          <div>
+            <label class="text-sm text-gray-600">Max tokens por respuesta</label>
+            <input id="settings-max" type="number" min="1" max="4000" class="w-full mt-1 border rounded px-3 py-2" placeholder="1000">
+          </div>
+          <div class="md:col-span-2">
+            <label class="text-sm text-gray-600">System prompt</label>
+            <textarea id="settings-prompt" rows="4" class="w-full mt-1 border rounded px-3 py-2" placeholder="Eres un asistente útil, tu nombre es mirlo"></textarea>
+          </div>
+          <div class="md:col-span-2 flex justify-end">
+            <button id="save-settings" class="bg-indigo-600 text-white px-4 py-2 rounded">Guardar configuración</button>
+          </div>
+        </div>
+      </div>
+
       <div>
         <div class="flex items-center justify-between mb-2">
           <h2 class="text-xl font-semibold">Últimos consumos</h2>
@@ -40,6 +70,64 @@
       async function get(path){ const r = await fetch(path); if(!r.ok) throw new Error(await r.text()); return r.json(); }
       async function post(path, data){ const r = await fetch(path, {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(data||{})}); if(!r.ok) throw new Error(await r.text()); return r.json(); }
 
+      async function loadSettings(){
+        try{
+          const r = await fetch('/api/settings');
+          if(!r.ok) throw new Error(await r.text());
+          const { settings } = await r.json();
+          // cargar modelos
+          try {
+            const rm = await fetch('/api/models');
+            const { models } = await rm.json();
+            window.__models = models;
+            const sel = document.getElementById('settings-model');
+            sel.innerHTML = '';
+            for (const m of models) {
+              const opt = document.createElement('option');
+              opt.value = m.name;
+              opt.textContent = `${m.name} (${m.provider})`;
+              sel.appendChild(opt);
+            }
+            sel.addEventListener('change', renderCosts);
+          } catch (e) { console.error(e); }
+
+          document.getElementById('settings-model').value = settings?.modelDefault ?? 'gpt-4.1-mini';
+          document.getElementById('settings-temp').value = settings?.temperature ?? 0.7;
+          document.getElementById('settings-max').value = settings?.maxTokens ?? 1000;
+          document.getElementById('settings-prompt').value = settings?.systemPrompt ?? 'Eres un asistente útil, tu nombre es mirlo';
+          renderCosts();
+        }catch(e){ console.error(e); }
+      }
+
+      function renderCosts(){
+        try{
+          const sel = document.getElementById('settings-model');
+          const name = sel.value;
+          const models = window.__models || [];
+          const m = models.find(x => x.name === name);
+          const div = document.getElementById('model-costs');
+          if(!m){ div.textContent = ''; return; }
+          const inC = Number(m.inputCostPerMillion);
+          const outC = Number(m.outputCostPerMillion);
+          div.innerHTML = `
+            <div><b>Proveedor:</b> ${m.provider}</div>
+            <div><b>Costo input:</b> $ ${inC} / 1M tokens</div>
+            <div><b>Costo output:</b> $ ${outC} / 1M tokens</div>`;
+        }catch(e){ console.error(e); }
+      }
+
+      async function saveSettings(){
+        const body = {
+          modelDefault: (document.getElementById('settings-model')).value.trim(),
+          temperature: Number((document.getElementById('settings-temp')).value),
+          maxTokens: Number((document.getElementById('settings-max')).value),
+          systemPrompt: (document.getElementById('settings-prompt')).value
+        };
+        const r = await fetch('/api/settings', { method: 'POST', headers: { 'content-type':'application/json' }, body: JSON.stringify(body) });
+        if(!r.ok){ alert('Error guardando: ' + await r.text()); return; }
+        alert('Configuración guardada');
+      }
+
       async function load() {
         try {
           const me = await get('/api/me');
@@ -58,6 +146,8 @@
               <div class="text-sm text-gray-500">API Key</div>
               <div class="text-xs break-all">${me.tenant.apikey}</div>
             </div>`;
+
+          await loadSettings();
 
           const tbody = document.getElementById('logs');
           tbody.innerHTML = '';
@@ -84,6 +174,8 @@
       document.getElementById('regen').addEventListener('click', async () => {
         try { const r = await post('/api/regenerate-key'); alert('Nueva API key: ' + r.apikey); load(); } catch(e){ alert('Error: '+e) }
       });
+
+      document.getElementById('save-settings').addEventListener('click', saveSettings);
 
       load();
     </script>
