@@ -219,7 +219,15 @@ app.post('/tenants/register', async (req, reply) => {
 // Input schema para /ai/answer
 const AiAnswerRequestSchema = z.object({
   system: z.object({ prompt: z.string().min(1), policies: z.object({ temperature: z.number().min(0).max(2).default(0.2), max_tokens: z.number().int().positive().max(4000).default(500) }) }),
-  conversation: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string() })).min(1),
+  conversation: z.array(z.object({
+    role: z.enum(['user', 'assistant']),
+    content: z.string(),
+    context_tools: z.array(z.object({
+      name: z.string(),
+      args: z.unknown().optional(),
+      result: z.unknown().optional()
+    })).optional()
+  })).min(1),
   model: z.string().min(1),
   trace: z.boolean().optional().default(false),
   context_tools: z.array(z.object({
@@ -244,13 +252,21 @@ app.post('/ai/answer', async (req, reply) => {
 
   // Sin tools (MCP/webhook removidos)
 
-  // 4. Build messages (inyectar context_tools si viene)
+  // 4. Build messages (inyectar context_tools globales y por-mensaje)
+  const convMessages: Array<{ role: 'user' | 'assistant'; content: string }> = parsed.conversation.flatMap((m: any) => {
+    if (m.role === 'assistant' && Array.isArray(m.context_tools) && m.context_tools.length > 0) {
+      const ctx = `Contexto de herramientas previas: ${JSON.stringify(m.context_tools)}`;
+      return [{ role: 'assistant', content: `${ctx}\n\n${m.content}` } as any];
+    }
+    return [{ role: m.role, content: m.content } as any];
+  });
+
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
     { role: 'system', content: parsed.system.prompt },
     ...(parsed.context_tools && parsed.context_tools.length
       ? [{ role: 'system', content: `Contexto de herramientas previas: ${JSON.stringify(parsed.context_tools)}` } as any]
       : []),
-    ...parsed.conversation
+    ...convMessages
   ];
 
   // Pre-cost estimation to enforce 402 before calling the model
@@ -364,9 +380,7 @@ app.post('/ai/answer', async (req, reply) => {
 
   // 10. Return response (devolver context_tools para próxima llamada)
   reply.send({
-    answer: { role: 'assistant', content: finalAnswer },
-    tool_calls: (assistantMessage?.tool_calls ?? []),
-    context_tools: contextToolsOut
+    answer: { role: 'assistant', context_tools: contextToolsOut, content: finalAnswer }
   });
 });
 
