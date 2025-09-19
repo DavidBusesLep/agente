@@ -23,8 +23,30 @@ function estimateTokensFromText(text: string): number {
   return Math.max(1, Math.ceil(chars / 4));
 }
 
-function estimateMessagesTokens(messages: Array<{ role: string; content: string }>): number {
-  return messages.reduce((sum, m) => sum + estimateTokensFromText(m.content), 0);
+function estimateTokensFromContent(content: any): number {
+  if (typeof content === 'string') {
+    return estimateTokensFromText(content);
+  }
+  
+  if (Array.isArray(content)) {
+    return content.reduce((sum, item) => {
+      if (item.type === 'text') {
+        return sum + estimateTokensFromText(item.text);
+      } else if (item.type === 'image_url') {
+        // Estimación aproximada para imágenes: ~765 tokens para imágenes de alta resolución
+        // ~85 tokens para baja resolución
+        const detail = item.image_url?.detail || 'auto';
+        return sum + (detail === 'low' ? 85 : 765);
+      }
+      return sum;
+    }, 0);
+  }
+  
+  return 0;
+}
+
+function estimateMessagesTokens(messages: Array<{ role: string; content: any }>): number {
+  return messages.reduce((sum, m) => sum + estimateTokensFromContent(m.content), 0);
 }
 
 const prisma = new PrismaClient();
@@ -59,6 +81,20 @@ async function ensureDefaultModels() {
         name: 'gpt-5',
         inputCostPerMillion: new Prisma.Decimal('1.00'),
         outputCostPerMillion: new Prisma.Decimal('3.00'),
+        isActive: true
+      },
+      {
+        provider: 'openai',
+        name: 'gpt-4-vision-preview',
+        inputCostPerMillion: new Prisma.Decimal('10.00'),
+        outputCostPerMillion: new Prisma.Decimal('30.00'),
+        isActive: true
+      },
+      {
+        provider: 'openai',
+        name: 'gpt-4o',
+        inputCostPerMillion: new Prisma.Decimal('5.00'),
+        outputCostPerMillion: new Prisma.Decimal('15.00'),
         isActive: true
       }
     ]
@@ -320,11 +356,29 @@ app.post('/tenants/register', async (req, reply) => {
   reply.send(created);
 });
 
+// Schema para contenido multimodal (texto + imágenes)
+const MessageContentSchema = z.union([
+  z.string(), // Contenido simple de texto
+  z.array(z.union([
+    z.object({
+      type: z.literal('text'),
+      text: z.string()
+    }),
+    z.object({
+      type: z.literal('image_url'),
+      image_url: z.object({
+        url: z.string().url(),
+        detail: z.enum(['low', 'high', 'auto']).optional().default('auto')
+      })
+    })
+  ])) // Contenido multimodal (array de texto e imágenes)
+]);
+
 // Input schema para /ai/answer (system se toma de Settings del tenant)
 const AiAnswerRequestSchema = z.object({
   conversation: z.array(z.object({
     role: z.enum(['user', 'assistant']),
-    content: z.string(),
+    content: MessageContentSchema,
     context_tools: z.array(z.object({
       name: z.string(),
       args: z.unknown().optional(),
@@ -376,18 +430,41 @@ app.post('/ai/answer', async (req, reply) => {
     return;
   }
 
+  // 3. Verificar si la conversación contiene imágenes y si el modelo las soporta
+  const hasImages = parsed.conversation.some(msg => 
+    Array.isArray(msg.content) && 
+    msg.content.some((item: any) => item.type === 'image_url')
+  );
+  
+  const visionModels = ['gpt-4-vision-preview', 'gpt-4o', 'gpt-4o-mini'];
+  if (hasImages && !visionModels.includes(model.name)) {
+    reply.code(400).send({ 
+      error: 'El modelo seleccionado no soporta imágenes',
+      suggestion: 'Usa uno de estos modelos para procesar imágenes: ' + visionModels.join(', ')
+    });
+    return;
+  }
+
   // Sin tools (MCP/webhook removidos)
 
-  // 4. Build messages (inyectar context_tools globales y por-mensaje)
-  const convMessages: Array<{ role: 'user' | 'assistant'; content: string }> = parsed.conversation.flatMap((m: any) => {
+  // 4. Build messages (inyectar context_tools globales y por-mensaje, soportar contenido multimodal)
+  const convMessages: Array<{ role: 'user' | 'assistant'; content: any }> = parsed.conversation.flatMap((m: any) => {
     if (m.role === 'assistant' && Array.isArray(m.context_tools) && m.context_tools.length > 0) {
       const ctx = `Contexto de herramientas previas: ${JSON.stringify(m.context_tools)}`;
-      return [{ role: 'assistant', content: `${ctx}\n\n${m.content}` } as any];
+      // Si el contenido es multimodal, necesitamos manejarlo diferente
+      if (Array.isArray(m.content)) {
+        // Agregar el contexto como texto al inicio del array de contenido
+        const contextContent = [{ type: 'text', text: ctx }, ...m.content];
+        return [{ role: 'assistant', content: contextContent } as any];
+      } else {
+        // Contenido simple de texto
+        return [{ role: 'assistant', content: `${ctx}\n\n${m.content}` } as any];
+      }
     }
     return [{ role: m.role, content: m.content } as any];
   });
 
-  const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+  const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }> = [
     { role: 'system', content: systemPrompt },
     ...(parsed.context_tools && parsed.context_tools.length
       ? [{ role: 'system', content: `Contexto de herramientas previas: ${JSON.stringify(parsed.context_tools)}` } as any]
