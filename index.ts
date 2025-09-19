@@ -187,8 +187,63 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
           console.log(`📄 Contenido decodificado: ${textContent.length} caracteres`);
           console.log(`🔍 Primeros 200 caracteres: ${textContent.slice(0, 200)}`);
           
+          // Detectar si el PDF usa compresión FlateDecode
+          const hasFlateDecode = textContent.includes('/Filter/FlateDecode') || textContent.includes('/FlateDecode');
+          if (hasFlateDecode) {
+            console.log('🗜️ PDF detectado con compresión FlateDecode - requiere descompresión');
+          }
+          
           // Buscar streams de texto en el PDF
           const textStreams = [];
+          
+          // Si hay FlateDecode, intentar extraer streams comprimidos
+          if (hasFlateDecode) {
+            try {
+              console.log('🔄 Intentando extraer streams comprimidos...');
+              
+              // Buscar objetos stream comprimidos
+              const streamPattern = /stream\s*([\s\S]*?)\s*endstream/g;
+              let streamMatch;
+              let streamCount = 0;
+              
+              while ((streamMatch = streamPattern.exec(textContent)) !== null && streamCount < 10) {
+                streamCount++;
+                const streamData = streamMatch[1];
+                console.log(`📦 Stream ${streamCount} encontrado, tamaño: ${streamData.length} bytes`);
+                
+                try {
+                  // Intentar descomprimir con zlib (Node.js built-in)
+                  const { inflateSync } = await import('zlib');
+                  
+                  // Convertir string a buffer para descompresión
+                  const compressedBuffer = Buffer.from(streamData, 'binary');
+                  const decompressed = inflateSync(compressedBuffer);
+                  const decompressedText = decompressed.toString('utf-8');
+                  
+                  console.log(`✅ Stream ${streamCount} descomprimido: ${decompressedText.length} caracteres`);
+                  console.log(`🔍 Contenido descomprimido: "${decompressedText.slice(0, 200)}..."`);
+                  
+                  // Buscar texto en el contenido descomprimido
+                  const textInStream = decompressedText.match(/\((.*?)\)/g) || [];
+                  textInStream.forEach(match => {
+                    const text = match.slice(1, -1); // Remover paréntesis
+                    if (text.length > 2 && /[a-zA-Z\s]/.test(text)) {
+                      textStreams.push(text);
+                      console.log(`📝 Texto encontrado en stream: "${text}"`);
+                    }
+                  });
+                  
+                } catch (decompressError: any) {
+                  console.log(`⚠️ No se pudo descomprimir stream ${streamCount}:`, decompressError.message);
+                }
+              }
+              
+              console.log(`📦 Total de streams procesados: ${streamCount}`);
+              
+            } catch (zlibError: any) {
+              console.log('⚠️ Error con descompresión zlib:', zlibError.message);
+            }
+          }
           
           // Patrón 1: Buscar objetos de texto explícitos
           const textObjectPattern = /BT\s+(.*?)\s+ET/gs;
@@ -279,6 +334,11 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
           }
           
           if (extractedText.length > 10) {
+            const method = hasFlateDecode ? 'native_pdf_parsing_with_decompression' : 'native_pdf_parsing';
+            const note = hasFlateDecode ? 
+              'Texto extraído con parser PDF nativo + descompresión FlateDecode' : 
+              'Texto extraído con parser PDF nativo optimizado';
+            
             console.log('✅ PDF procesado exitosamente con método nativo');
             console.log(`📤 Enviando texto final: ${extractedText.length} caracteres`);
             console.log(`📤 Texto final completo: "${extractedText}"`);
@@ -288,10 +348,11 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
                 format: 'pdf',
                 originalLength: extractedText.length,
                 truncated: extractedText.length >= maxLength,
-                method: 'native_pdf_parsing',
+                method: method,
                 size: buffer.byteLength,
                 streams_found: textStreams.length,
-                note: 'Texto extraído con parser PDF nativo optimizado'
+                compressed: hasFlateDecode,
+                note: note
               }
             };
           } else {
