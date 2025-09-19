@@ -226,11 +226,33 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
                 if (!createWorker) {
                   throw new Error('tesseract_createWorker_not_available');
                 }
-                // Evitar pasar funciones en opciones para no romper la clonación al worker
-                const worker = await createWorker();
-                await worker.load();
-                await worker.loadLanguage(lang);
-                await worker.initialize(lang);
+                const langArg: any = (lang.includes('+') ? lang.split('+') : lang);
+                let worker: any = null;
+                let useNewApi = true;
+                try {
+                  // API nueva (v5): createWorker(langs) ya viene listo
+                  worker = await createWorker(langArg);
+                  if (!worker || typeof worker.recognize !== 'function') {
+                    useNewApi = false;
+                  }
+                } catch {
+                  useNewApi = false;
+                }
+
+                if (!useNewApi) {
+                  // Fallback API anterior
+                  worker = await createWorker();
+                  if (typeof worker.load === 'function') {
+                    try { await worker.load(); } catch {}
+                  }
+                  if (typeof worker.loadLanguage === 'function') {
+                    await worker.loadLanguage(lang);
+                  }
+                  if (typeof worker.initialize === 'function') {
+                    await worker.initialize(lang);
+                  }
+                }
+
                 const ocrTexts: string[] = [];
                 for (let idx = 0; idx < imageBuffers.length; idx++) {
                   console.log(`🔤 OCR página ${idx + 1}/${imageBuffers.length} (DPI=${dpi}, lang=${lang})`);
@@ -238,7 +260,9 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
                   const pageText = String(data?.text || '').trim();
                   if (pageText) ocrTexts.push(pageText);
                 }
-                await worker.terminate();
+                if (typeof worker.terminate === 'function') {
+                  await worker.terminate();
+                }
                 const ocrCombined = ocrTexts.join('\n\n').trim();
                 // Limpieza best-effort
                 try { await fs.unlink(pdfPath); } catch {}
