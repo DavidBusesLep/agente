@@ -1350,18 +1350,9 @@ app.post('/ai/answer', async (req, reply) => {
       if (verbosity) {
         baseReq.verbosity = verbosity;
       }
-      // tool_choice (allowed_tools auto) si hay tools definidas
+      // tool_choice compatible con Chat Completions
       if (toolDefs.length) {
-        try {
-          const toolNames = toolDefs
-            .map((t: any) => t?.function?.name || t?.name)
-            .filter((n: any) => typeof n === 'string');
-          baseReq.tool_choice = {
-            type: 'allowed_tools',
-            mode: 'auto',
-            tools: toolNames.map((name: string) => ({ type: 'function', name }))
-          };
-        } catch {}
+        baseReq.tool_choice = 'auto';
       }
     }
     const resp = await createChatCompletionAdaptive(baseReq);
