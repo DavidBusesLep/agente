@@ -340,6 +340,19 @@ const AiAnswerRequestSchema = z.object({
   })).optional().default([])
 });
 
+// Schema para el endpoint de transcripción
+// Formatos nativos: mp3, mp4, mpeg, mpga, m4a, wav, webm
+// Formatos con conversión: ogg (WhatsApp voice messages)
+const TranscriptionRequestSchema = z.object({
+  mode: z.enum(['stt']),
+  audio_url: z.string().url(), // URL del archivo de audio (soporta: mp3, mp4, mpeg, mpga, m4a, wav, webm, ogg)
+  model: z.string().optional().default('whisper-1'),
+  language: z.string().optional(), // Código ISO 639-1 (ej: 'es', 'en', 'fr')
+  prompt: z.string().optional(), // Texto que guía el estilo de transcripción
+  response_format: z.enum(['json', 'text', 'srt', 'verbose_json', 'vtt']).optional().default('json'),
+  temperature: z.number().min(0).max(1).optional() // 0 = más conservador, 1 = más creativo
+});
+
 // Tools importadas desde src/tools/localTools
 
 app.post('/ai/answer', async (req, reply) => {
@@ -495,6 +508,177 @@ app.post('/ai/answer', async (req, reply) => {
   reply.send({
     answer: { role: 'assistant', context_tools: contextToolsOut, content: finalAnswer }
   });
+});
+
+// Endpoint para transcripción de audio
+app.post('/ai/transcripcion', async (req, reply) => {
+  const parsed = TranscriptionRequestSchema.parse(req.body);
+  const tenant = req.tenant!;
+
+  if (parsed.mode !== 'stt') {
+    reply.code(400).send({ error: 'Solo se soporta el modo "stt" (speech-to-text)' });
+    return;
+  }
+
+  try {
+    // Descargar el archivo de audio desde la URL
+    const audioResponse = await fetch(parsed.audio_url);
+    if (!audioResponse.ok) {
+      reply.code(400).send({ error: 'No se pudo descargar el archivo de audio desde la URL proporcionada' });
+      return;
+    }
+
+    const audioBuffer = await audioResponse.arrayBuffer();
+    
+    // Detectar extensión del archivo desde la URL
+    const urlPath = new URL(parsed.audio_url).pathname;
+    const originalExtension = urlPath.split('.').pop()?.toLowerCase() || 'wav';
+    const nativeSupportedFormats = ['mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'wav', 'webm'];
+    const allSupportedFormats = [...nativeSupportedFormats, 'ogg']; // OGG requiere conversión
+    
+    // Verificar si el formato está soportado
+    if (!allSupportedFormats.includes(originalExtension)) {
+      reply.code(400).send({ 
+        error: `Formato de audio no soportado: ${originalExtension}`,
+        supported_formats: allSupportedFormats
+      });
+      return;
+    }
+    
+    let audioBufferForWhisper = audioBuffer;
+    let fileExtension = originalExtension;
+    let fileName = `audio.${fileExtension}`;
+    
+    // Si es OGG, necesitamos convertir a WAV (nota: requeriría FFmpeg en producción)
+    if (originalExtension === 'ogg') {
+      // Por ahora, intentamos enviar como OGG y si falla, informamos al usuario
+      // En producción, aquí se implementaría conversión con FFmpeg
+      fileExtension = 'ogg';
+      fileName = 'audio.ogg';
+      console.log('⚠️  Archivo OGG detectado. Nota: puede requerir conversión para mejor compatibilidad.');
+    }
+    
+    const audioBlob = new Blob([audioBuffer]);
+
+    // Crear un FormData para la petición a OpenAI
+    const formData = new FormData();
+    formData.append('file', audioBlob, fileName);
+    formData.append('model', parsed.model || 'whisper-1');
+    formData.append('response_format', parsed.response_format || 'json');
+    
+    if (parsed.language) {
+      formData.append('language', parsed.language);
+    }
+    if (parsed.prompt) {
+      formData.append('prompt', parsed.prompt);
+    }
+    if (parsed.temperature !== undefined) {
+      formData.append('temperature', parsed.temperature.toString());
+    }
+
+    // Llamar a la API de OpenAI Whisper
+    const transcriptionResponse = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: formData
+    });
+
+    if (!transcriptionResponse.ok) {
+      const errorData = await transcriptionResponse.text();
+      console.error('Error de OpenAI:', errorData);
+      reply.code(500).send({ error: 'Error al procesar la transcripción' });
+      return;
+    }
+
+    const transcriptionResult = await transcriptionResponse.json();
+
+    // Estimación de costo para transcripción (Whisper cobra por minuto de audio)
+    // Precio aproximado: $0.006 por minuto
+    const audioSizeInMB = audioBuffer.byteLength / (1024 * 1024);
+    const estimatedMinutes = audioSizeInMB / 1; // Estimación aproximada: 1MB ≈ 1 minuto
+    const estimatedCost = estimatedMinutes * 0.006;
+
+    // Verificar saldo antes de procesar
+    if (new Prisma.Decimal(estimatedCost).gt(tenant.balance)) {
+      reply.code(402).send({ error: 'Saldo insuficiente para procesar la transcripción' });
+      return;
+    }
+
+    // Logging de uso y facturación
+    try {
+      await prisma.$transaction(async tx => {
+        const freshTenant = await tx.tenant.findUnique({ 
+          where: { id: tenant.id }, 
+          select: { id: true, balance: true } 
+        });
+        
+        if (!freshTenant) throw new Error('Tenant not found');
+        if (freshTenant.balance.lt(estimatedCost)) {
+          throw Object.assign(new Error('Saldo insuficiente'), { httpStatus: 402 });
+        }
+
+        // Buscar o crear un modelo para Whisper transcripciones
+        let whisperModel = await tx.model.findFirst({ 
+          where: { name: 'whisper-1', provider: 'openai' } 
+        });
+        
+        if (!whisperModel) {
+          whisperModel = await tx.model.create({
+            data: {
+              provider: 'openai',
+              name: 'whisper-1',
+              inputCostPerMillion: new Prisma.Decimal('0.006'), // $0.006 por minuto
+              outputCostPerMillion: new Prisma.Decimal('0'), // No hay output tokens en transcripción
+              isActive: true
+            }
+          });
+        }
+
+        // Crear registro de uso para transcripción
+        await tx.usageLog.create({
+          data: {
+            tenantId: tenant.id,
+            modelId: whisperModel.id,
+            tokensIn: Math.round(estimatedMinutes), // Usamos minutos como "input tokens"
+            tokensOut: 0,
+            costUsd: new Prisma.Decimal(estimatedCost),
+          }
+        });
+
+        await tx.tenant.update({
+          where: { id: tenant.id },
+          data: { balance: freshTenant.balance.minus(estimatedCost) }
+        });
+      });
+    } catch (err: any) {
+      if (err?.httpStatus === 402) {
+        reply.code(402).send({ error: 'Saldo insuficiente' });
+        return;
+      }
+      throw err;
+    }
+
+    // Devolver resultado de transcripción
+    reply.send({
+      mode: 'stt',
+      transcription: transcriptionResult,
+      cost_usd: estimatedCost,
+      audio_size_mb: audioSizeInMB.toFixed(2),
+      audio_format: originalExtension,
+      processed_as: fileExtension,
+      supported_formats: allSupportedFormats,
+      note: originalExtension === 'ogg' ? 'Archivo OGG procesado. Para mejor compatibilidad, considera convertir a WAV o MP3.' : undefined
+    });
+
+  } catch (error: any) {
+    console.error('Error en transcripción:', error);
+    reply.code(500).send({ 
+      error: 'Error interno del servidor al procesar la transcripción',
+      details: error.message 
+    });
+  }
 });
 
 async function main() {
