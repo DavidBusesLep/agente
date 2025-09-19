@@ -836,6 +836,11 @@ async function createChatCompletionAdaptive(params: any) {
       (retry as any).max_completion_tokens = params.max_tokens;
       return await openai.chat.completions.create(retry as any);
     }
+    if (msg.includes('Unsupported parameter') && msg.includes('tool_choice')) {
+      const retry = { ...params };
+      delete (retry as any).tool_choice;
+      return await openai.chat.completions.create(retry as any);
+    }
     // Fallback: algunos modelos no soportan tools. Reintentamos sin tools.
     if (msg.toLowerCase().includes('tools is not supported')) {
       const retry = { ...params };
@@ -1344,6 +1349,19 @@ app.post('/ai/answer', async (req, reply) => {
       }
       if (verbosity) {
         baseReq.verbosity = verbosity;
+      }
+      // tool_choice (allowed_tools auto) si hay tools definidas
+      if (toolDefs.length) {
+        try {
+          const toolNames = toolDefs
+            .map((t: any) => t?.function?.name || t?.name)
+            .filter((n: any) => typeof n === 'string');
+          baseReq.tool_choice = {
+            type: 'allowed_tools',
+            mode: 'auto',
+            tools: toolNames.map((name: string) => ({ type: 'function', name }))
+          };
+        } catch {}
       }
     }
     const resp = await createChatCompletionAdaptive(baseReq);
