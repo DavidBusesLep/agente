@@ -546,74 +546,8 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
             if (ocrEnabledPre && (likelyScanned && (extractedText.length < 120 || letterRatio < 0.25))) {
               try {
                 console.log('🔎 Intentando OCR por baja calidad de texto nativo...');
-                const maxPages = Number(process.env.PDF_OCR_MAX_PAGES || 3);
-                const dpi = Number(process.env.PDF_OCR_DPI || 200);
-                const lang = process.env.PDF_OCR_LANG || 'spa+eng';
-
-                const tempDir = join(tmpdir(), 'agent-docproc');
-                try { await fs.mkdir(tempDir, { recursive: true }); } catch {}
-
-                const pdfPath = join(tempDir, `in-${Date.now()}-${Math.random().toString(16).slice(2)}.pdf`);
-                await fs.writeFile(pdfPath, Buffer.from(buffer));
-
-                const outPrefix = join(tempDir, `out-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-
-                try {
-                  await execFileAsync('pdftoppm', ['-png', '-r', String(dpi), '-f', '1', '-l', String(maxPages), pdfPath, outPrefix]);
-                } catch (ppmErr: any) {
-                  console.warn('❌ pdftoppm no disponible o falló (fase previa):', ppmErr.message);
-                  throw new Error('pdftoppm_not_available');
-                }
-
-                const imageBuffers: Buffer[] = [];
-                for (let i = 1; i <= maxPages; i++) {
-                  const imgPath = `${outPrefix}-${i}.png`;
-                  try {
-                    const buf = await fs.readFile(imgPath);
-                    imageBuffers.push(buf);
-                  } catch {}
-                }
-
-                if (imageBuffers.length > 0) {
-                  try {
-                    const tesseract: any = await import('tesseract.js');
-                    const ocrTexts: string[] = [];
-                    for (let idx = 0; idx < imageBuffers.length; idx++) {
-                      console.log(`🔤 OCR página ${idx + 1}/${imageBuffers.length} (DPI=${dpi}, lang=${lang})`);
-                      const res = await (tesseract as any).recognize(imageBuffers[idx], lang);
-                      const pageText = String(res?.data?.text || '').trim();
-                      if (pageText) ocrTexts.push(pageText);
-                    }
-                    const ocrCombined = ocrTexts.join('\n\n').trim();
-                    if (ocrCombined.length > 0) {
-                      const finalText = ocrCombined.slice(0, maxLength);
-                      try { await fs.unlink(pdfPath); } catch {}
-                      for (let i = 1; i <= imageBuffers.length; i++) { try { await fs.unlink(`${outPrefix}-${i}.png`); } catch {} }
-                      console.log(`✅ OCR exitoso (pre). Caracteres extraídos: ${finalText.length}`);
-                      return {
-                        text: finalText,
-                        metadata: {
-                          format: 'pdf',
-                          method: 'ocr_pdftoppm_tesseract',
-                          pages_ocr: imageBuffers.length,
-                          dpi: dpi,
-                          lang: lang,
-                          truncated: ocrCombined.length > maxLength,
-                          size: buffer.byteLength,
-                          note: 'Texto obtenido por OCR de imágenes renderizadas desde PDF'
-                        }
-                      };
-                    }
-                  } catch (ocrErr: any) {
-                    if (ocrErr?.code === 'ERR_MODULE_NOT_FOUND' || /Cannot find module/.test(String(ocrErr?.message || ''))) {
-                      console.warn('❌ tesseract.js no está instalado (fase previa). Ejecuta: npm install tesseract.js');
-                    } else {
-                      console.warn('❌ Error durante OCR (fase previa):', ocrErr?.message || ocrErr);
-                    }
-                  } finally {
-                    try { await fs.unlink(pdfPath); } catch {}
-                  }
-                }
+                const ocrResult = await doPdfOcr();
+                if (ocrResult) return ocrResult;
               } catch {}
             }
             const method = hasFlateDecode ? 'native_pdf_parsing_with_decompression' : 'native_pdf_parsing';
@@ -671,86 +605,9 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
           const ocrEnabled = enableOcr === '1' || enableOcr === 'true' || enableOcr === 'yes';
           if (ocrEnabled) {
             try {
-              console.log('🔎 Intentando OCR: conversión PDF→PNG con pdftoppm y OCR con tesseract.js');
-              const maxPages = Number(process.env.PDF_OCR_MAX_PAGES || 3);
-              const dpi = Number(process.env.PDF_OCR_DPI || 200);
-              const lang = process.env.PDF_OCR_LANG || 'spa+eng';
-
-              const tempDir = join(tmpdir(), 'agent-docproc');
-              try { await fs.mkdir(tempDir, { recursive: true }); } catch {}
-
-              const pdfPath = join(tempDir, `in-${Date.now()}-${Math.random().toString(16).slice(2)}.pdf`);
-              await fs.writeFile(pdfPath, Buffer.from(buffer));
-
-              const outPrefix = join(tempDir, `out-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-
-              // Ejecutar pdftoppm (requiere Poppler instalado y en PATH)
-              try {
-                await execFileAsync('pdftoppm', ['-png', '-r', String(dpi), '-f', '1', '-l', String(maxPages), pdfPath, outPrefix]);
-              } catch (ppmErr: any) {
-                console.warn('❌ pdftoppm no disponible o falló:', ppmErr.message);
-                console.warn('💡 Instala Poppler y agrega pdftoppm al PATH. Windows: instalar Poppler para Windows.');
-                throw new Error('pdftoppm_not_available');
-              }
-
-              // Recolectar imágenes generadas
-              const imageBuffers: Buffer[] = [];
-              for (let i = 1; i <= maxPages; i++) {
-                const imgPath = `${outPrefix}-${i}.png`;
-                try {
-                  const buf = await fs.readFile(imgPath);
-                  imageBuffers.push(buf);
-                } catch {}
-              }
-
-              if (imageBuffers.length === 0) {
-                throw new Error('no_images_generated');
-              }
-
-              // OCR con tesseract.js (lazy import)
-              try {
-                const tesseract: any = await import('tesseract.js');
-                const ocrTexts: string[] = [];
-                for (let idx = 0; idx < imageBuffers.length; idx++) {
-                  console.log(`🔤 OCR página ${idx + 1}/${imageBuffers.length} (DPI=${dpi}, lang=${lang})`);
-                  const res = await (tesseract as any).recognize(imageBuffers[idx], lang);
-                  const pageText = String(res?.data?.text || '').trim();
-                  if (pageText) ocrTexts.push(pageText);
-                }
-
-                const ocrCombined = ocrTexts.join('\n\n').trim();
-                if (ocrCombined.length > 0) {
-                  const finalText = ocrCombined.slice(0, maxLength);
-                  try { await fs.unlink(pdfPath); } catch {}
-                  // Intentar borrar imágenes (best-effort)
-                  for (let i = 1; i <= imageBuffers.length; i++) {
-                    try { await fs.unlink(`${outPrefix}-${i}.png`); } catch {}
-                  }
-                  console.log(`✅ OCR exitoso. Caracteres extraídos: ${finalText.length}`);
-                  return {
-                    text: finalText,
-                    metadata: {
-                      format: 'pdf',
-                      method: 'ocr_pdftoppm_tesseract',
-                      pages_ocr: imageBuffers.length,
-                      dpi: dpi,
-                      lang: lang,
-                      truncated: ocrCombined.length > maxLength,
-                      size: buffer.byteLength,
-                      note: 'Texto obtenido por OCR de imágenes renderizadas desde PDF'
-                    }
-                  };
-                }
-              } catch (ocrErr: any) {
-                if (ocrErr?.code === 'ERR_MODULE_NOT_FOUND' || /Cannot find module/.test(String(ocrErr?.message || ''))) {
-                  console.warn('❌ tesseract.js no está instalado. Ejecuta: npm install tesseract.js');
-                } else {
-                  console.warn('❌ Error durante OCR:', ocrErr?.message || ocrErr);
-                }
-              } finally {
-                // Limpieza best-effort
-                try { await fs.unlink(pdfPath); } catch {}
-              }
+              console.log('🔎 Intentando OCR (post-fallback)...');
+              const ocrResult = await doPdfOcr();
+              if (ocrResult) return ocrResult;
             } catch (ocrSetupErr: any) {
               console.warn('⚠️ OCR no se pudo ejecutar:', ocrSetupErr?.message || ocrSetupErr);
             }
