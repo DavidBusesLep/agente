@@ -182,6 +182,99 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
       case 'pdf':
         // Procesamiento de PDF con método robusto mejorado
         try {
+          // Función interna para intentar OCR (pdftoppm + tesseract)
+          const doPdfOcr = async (): Promise<{ text: string; metadata: any } | null> => {
+            try {
+              const maxPages = Number(process.env.PDF_OCR_MAX_PAGES || 3);
+              const dpi = Number(process.env.PDF_OCR_DPI || 200);
+              const lang = process.env.PDF_OCR_LANG || 'spa+eng';
+
+              const tempDir = join(tmpdir(), 'agent-docproc');
+              try { await fs.mkdir(tempDir, { recursive: true }); } catch {}
+
+              const pdfPath = join(tempDir, `in-${Date.now()}-${Math.random().toString(16).slice(2)}.pdf`);
+              await fs.writeFile(pdfPath, Buffer.from(buffer));
+
+              const outPrefix = join(tempDir, `out-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+              try {
+                console.log('🔎 Intentando OCR: conversión PDF→PNG con pdftoppm');
+                await execFileAsync('pdftoppm', ['-png', '-r', String(dpi), '-f', '1', '-l', String(maxPages), pdfPath, outPrefix]);
+              } catch (ppmErr: any) {
+                console.warn('❌ pdftoppm no disponible o falló:', ppmErr.message);
+                console.warn('💡 Instala Poppler y agrega pdftoppm al PATH.');
+                throw new Error('pdftoppm_not_available');
+              }
+
+              const imageBuffers: Buffer[] = [];
+              for (let i = 1; i <= maxPages; i++) {
+                const imgPath = `${outPrefix}-${i}.png`;
+                try {
+                  const buf = await fs.readFile(imgPath);
+                  imageBuffers.push(buf);
+                } catch {}
+              }
+
+              if (imageBuffers.length === 0) {
+                throw new Error('no_images_generated');
+              }
+
+              try {
+                console.log('🔤 Ejecutando OCR con tesseract.js');
+                const tesseract: any = await import('tesseract.js');
+                const ocrTexts: string[] = [];
+                for (let idx = 0; idx < imageBuffers.length; idx++) {
+                  console.log(`🔤 OCR página ${idx + 1}/${imageBuffers.length} (DPI=${dpi}, lang=${lang})`);
+                  const res = await (tesseract as any).recognize(imageBuffers[idx], lang);
+                  const pageText = String(res?.data?.text || '').trim();
+                  if (pageText) ocrTexts.push(pageText);
+                }
+                const ocrCombined = ocrTexts.join('\n\n').trim();
+                // Limpieza best-effort
+                try { await fs.unlink(pdfPath); } catch {}
+                for (let i = 1; i <= imageBuffers.length; i++) { try { await fs.unlink(`${outPrefix}-${i}.png`); } catch {} }
+
+                if (ocrCombined.length > 0) {
+                  const finalText = ocrCombined.slice(0, maxLength);
+                  console.log(`✅ OCR exitoso. Caracteres extraídos: ${finalText.length}`);
+                  return {
+                    text: finalText,
+                    metadata: {
+                      format: 'pdf',
+                      method: 'ocr_pdftoppm_tesseract',
+                      pages_ocr: imageBuffers.length,
+                      dpi: dpi,
+                      lang: lang,
+                      truncated: ocrCombined.length > maxLength,
+                      size: buffer.byteLength,
+                      note: 'Texto obtenido por OCR de imágenes renderizadas desde PDF'
+                    }
+                  };
+                }
+              } catch (ocrErr: any) {
+                if (ocrErr?.code === 'ERR_MODULE_NOT_FOUND' || /Cannot find module/.test(String(ocrErr?.message || ''))) {
+                  console.warn('❌ tesseract.js no está instalado. Ejecuta: npm install tesseract.js');
+                } else {
+                  console.warn('❌ Error durante OCR:', ocrErr?.message || ocrErr);
+                }
+              }
+
+            } catch (ocrSetupErr: any) {
+              console.warn('⚠️ OCR no se pudo ejecutar:', ocrSetupErr?.message || ocrSetupErr);
+            }
+            return null;
+          };
+
+          // OCR forzado por entorno: saltear parser nativo
+          const forceOcrEnv = String(process.env.FORCE_PDF_OCR || '').toLowerCase();
+          const forceOcr = forceOcrEnv === '1' || forceOcrEnv === 'true' || forceOcrEnv === 'yes';
+          if (forceOcr) {
+            console.log('⛓️  OCR forzado por FORCE_PDF_OCR');
+            const ocrResult = await doPdfOcr();
+            if (ocrResult) return ocrResult;
+            console.log('⚠️ OCR forzado falló; continuando con parser nativo');
+          }
+
           console.log('🔄 Procesando PDF con método nativo mejorado...');
           console.log(`📊 Tamaño del archivo PDF: ${buffer.byteLength} bytes`);
           
