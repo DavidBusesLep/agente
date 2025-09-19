@@ -178,10 +178,14 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
         // Procesamiento de PDF con método robusto mejorado
         try {
           console.log('🔄 Procesando PDF con método nativo mejorado...');
+          console.log(`📊 Tamaño del archivo PDF: ${buffer.byteLength} bytes`);
           
           // Método 1: Intentar extraer texto usando patrones PDF específicos
           const textDecoder = new TextDecoder('utf-8', { fatal: false });
           const textContent = textDecoder.decode(buffer);
+          
+          console.log(`📄 Contenido decodificado: ${textContent.length} caracteres`);
+          console.log(`🔍 Primeros 200 caracteres: ${textContent.slice(0, 200)}`);
           
           // Buscar streams de texto en el PDF
           const textStreams = [];
@@ -189,31 +193,55 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
           // Patrón 1: Buscar objetos de texto explícitos
           const textObjectPattern = /BT\s+(.*?)\s+ET/gs;
           let match;
+          let btCount = 0;
           while ((match = textObjectPattern.exec(textContent)) !== null) {
+            btCount++;
             textStreams.push(match[1]);
+            console.log(`📝 BT/ET bloque ${btCount}: "${match[1].slice(0, 100)}..."`);
           }
+          console.log(`🎯 Encontrados ${btCount} bloques BT/ET`);
           
           // Patrón 2: Buscar strings entre paréntesis (texto directo en PDF)
           const directTextPattern = /\((.*?)\)/g;
+          let parenthesesCount = 0;
           while ((match = directTextPattern.exec(textContent)) !== null) {
             const text = match[1];
             // Filtrar texto que parece válido (no binario)
             if (text.length > 2 && /[a-zA-Z\s]/.test(text)) {
+              parenthesesCount++;
               textStreams.push(text);
+              if (parenthesesCount <= 10) { // Solo mostrar los primeros 10
+                console.log(`📝 Texto en paréntesis ${parenthesesCount}: "${text}"`);
+              }
             }
           }
+          console.log(`🎯 Encontrados ${parenthesesCount} textos en paréntesis válidos`);
           
           // Patrón 3: Buscar secuencias de texto después de comandos de texto
           const tjPattern = /Tj\s*\((.*?)\)/g;
+          let tjCount = 0;
           while ((match = tjPattern.exec(textContent)) !== null) {
+            tjCount++;
             textStreams.push(match[1]);
+            if (tjCount <= 5) {
+              console.log(`📝 Comando Tj ${tjCount}: "${match[1]}"`);
+            }
           }
+          console.log(`🎯 Encontrados ${tjCount} comandos Tj`);
           
           // Patrón 4: Buscar arrays de texto
           const arrayTextPattern = /\[\s*\((.*?)\)\s*\]/g;
+          let arrayCount = 0;
           while ((match = arrayTextPattern.exec(textContent)) !== null) {
+            arrayCount++;
             textStreams.push(match[1]);
+            if (arrayCount <= 5) {
+              console.log(`📝 Array de texto ${arrayCount}: "${match[1]}"`);
+            }
           }
+          console.log(`🎯 Encontrados ${arrayCount} arrays de texto`);
+          
+          console.log(`📊 Total de streams de texto encontrados: ${textStreams.length}`);
           
           // Combinar y limpiar texto extraído
           let extractedText = textStreams
@@ -223,23 +251,37 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
             .replace(/\s+/g, ' ')
             .trim();
           
+          console.log(`📝 Texto combinado inicial: ${extractedText.length} caracteres`);
+          console.log(`🔍 Primeros 300 caracteres del texto extraído: "${extractedText.slice(0, 300)}"`);
+          console.log(`🔍 Últimos 100 caracteres del texto extraído: "${extractedText.slice(-100)}"`);
+          
+          
           // Si no encontramos texto estructurado, buscar palabras sueltas
           if (extractedText.length < 20) {
+            console.log('⚠️ Texto insuficiente, intentando método de palabras sueltas...');
             const wordPattern = /\b[a-zA-Z]{3,}\b/g;
             const words = textContent.match(wordPattern) || [];
+            console.log(`🔍 Palabras encontradas: ${words.length}`);
+            if (words.length > 0) {
+              console.log(`🔍 Primeras 20 palabras: ${words.slice(0, 20).join(', ')}`);
+            }
             extractedText = words
               .filter(word => word.length > 2)
               .slice(0, 500) // Limitar a las primeras 500 palabras
               .join(' ');
+            console.log(`📝 Texto de palabras sueltas: ${extractedText.length} caracteres`);
           }
           
           // Truncar si es necesario
           if (extractedText.length > maxLength) {
             extractedText = extractedText.slice(0, maxLength) + '...';
+            console.log(`✂️ Texto truncado a ${maxLength} caracteres`);
           }
           
           if (extractedText.length > 10) {
             console.log('✅ PDF procesado exitosamente con método nativo');
+            console.log(`📤 Enviando texto final: ${extractedText.length} caracteres`);
+            console.log(`📤 Texto final completo: "${extractedText}"`);
             return {
               text: extractedText,
               metadata: {
@@ -253,6 +295,7 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
               }
             };
           } else {
+            console.log('⚠️ Texto insuficiente, intentando método de fallback...');
             // Último intento: extraer cualquier texto legible
             const fallbackText = textContent
               .replace(/[^\x20-\x7E\s]/g, ' ')
@@ -260,8 +303,12 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
               .trim()
               .slice(0, maxLength);
             
+            console.log(`📝 Texto de fallback: ${fallbackText.length} caracteres`);
+            console.log(`🔍 Texto de fallback: "${fallbackText.slice(0, 200)}..."`);
+            
             if (fallbackText.length > 10) {
               console.log('⚠️ PDF procesado con método de fallback');
+              console.log(`📤 Enviando texto de fallback: "${fallbackText}"`);
               return {
                 text: fallbackText,
                 metadata: {
@@ -277,6 +324,8 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
           }
           
           // Si todo falla
+          console.log('❌ No se pudo extraer texto del PDF con ningún método');
+          console.log(`📊 Resumen: BT/ET: ${btCount}, Paréntesis: ${parenthesesCount}, Tj: ${tjCount}, Arrays: ${arrayCount}`);
           return {
             text: '[PDF] Este archivo PDF no contiene texto extraíble o está protegido. Considera convertirlo a texto usando herramientas externas o OCR.',
             metadata: {
@@ -284,12 +333,14 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
               size: buffer.byteLength,
               method: 'extraction_failed',
               note: 'PDF sin texto extraíble - posiblemente escaneado o protegido',
-              solution: 'Usar OCR o convertir PDF a texto externamente'
+              solution: 'Usar OCR o convertir PDF a texto externamente',
+              patterns_found: { bt_et: btCount, parentheses: parenthesesCount, tj: tjCount, arrays: arrayCount }
             }
           };
           
         } catch (error: any) {
           console.error('❌ Error procesando PDF:', error.message);
+          console.error('❌ Stack trace:', error.stack);
           return {
             text: '[PDF] Error al procesar el archivo PDF. Verifica que el archivo no esté corrupto.',
             metadata: {
@@ -822,6 +873,8 @@ app.post('/ai/answer', async (req, reply) => {
         for (const item of message.content) {
           if (item.type === 'document_url') {
             try {
+              console.log(`📄 Procesando documento desde URL: ${item.document_url.url}`);
+              
               // Descargar y extraer texto del documento
               const documentResponse = await fetch(item.document_url.url);
               if (!documentResponse.ok) {
@@ -833,10 +886,18 @@ app.post('/ai/answer', async (req, reply) => {
               const filename = urlPath.split('/').pop() || 'document.txt';
               const maxLength = item.document_url.max_length || 10000;
               
+              console.log(`📄 Archivo descargado: ${filename}, tamaño: ${documentBuffer.byteLength} bytes`);
+              
               const extraction = await extractTextFromDocument(documentBuffer, filename, maxLength);
+              
+              console.log(`📄 Texto extraído: ${extraction.text.length} caracteres`);
+              console.log(`📄 Metadatos: ${JSON.stringify(extraction.metadata, null, 2)}`);
               
               // Reemplazar el document_url con el texto extraído
               const documentText = `[DOCUMENTO: ${filename}]\n\n${extraction.text}\n\n[FIN DEL DOCUMENTO]`;
+              
+              console.log(`📤 Texto final para IA: ${documentText.length} caracteres`);
+              console.log(`📤 Contenido para IA: "${documentText.slice(0, 500)}..."`);
               
               // Convertir document_url a text con el contenido extraído
               item.type = 'text' as any;
@@ -844,7 +905,8 @@ app.post('/ai/answer', async (req, reply) => {
               delete (item as any).document_url;
               
             } catch (error: any) {
-              console.error('Error procesando documento:', error);
+              console.error('❌ Error procesando documento:', error);
+              console.error('❌ URL del documento:', item.document_url.url);
               // En caso de error, convertir a texto con mensaje de error
               item.type = 'text' as any;
               (item as any).text = `[ERROR] No se pudo procesar el documento: ${error.message}`;
