@@ -5,6 +5,10 @@ import fastifyJwt from '@fastify/jwt';
 import fastifyStatic from '@fastify/static';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { promises as fs } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { PrismaClient, Prisma } from '@prisma/client';
 import OpenAI from 'openai';
 import { z } from 'zod';
@@ -84,6 +88,7 @@ function estimateMessagesTokens(messages: Array<{ role: string; content: any }>)
 
 const prisma = new PrismaClient();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const execFileAsync = promisify(execFile);
 
 type TenantAuth = {
   id: string;
@@ -489,6 +494,96 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
             }
           }
           
+          // Si no hay texto, intentar OCR si está habilitado por entorno
+          const enableOcr = String(process.env.ENABLE_PDF_OCR || '').toLowerCase();
+          const ocrEnabled = enableOcr === '1' || enableOcr === 'true' || enableOcr === 'yes';
+          if (ocrEnabled) {
+            try {
+              console.log('🔎 Intentando OCR: conversión PDF→PNG con pdftoppm y OCR con tesseract.js');
+              const maxPages = Number(process.env.PDF_OCR_MAX_PAGES || 3);
+              const dpi = Number(process.env.PDF_OCR_DPI || 200);
+              const lang = process.env.PDF_OCR_LANG || 'spa+eng';
+
+              const tempDir = join(tmpdir(), 'agent-docproc');
+              try { await fs.mkdir(tempDir, { recursive: true }); } catch {}
+
+              const pdfPath = join(tempDir, `in-${Date.now()}-${Math.random().toString(16).slice(2)}.pdf`);
+              await fs.writeFile(pdfPath, Buffer.from(buffer));
+
+              const outPrefix = join(tempDir, `out-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+              // Ejecutar pdftoppm (requiere Poppler instalado y en PATH)
+              try {
+                await execFileAsync('pdftoppm', ['-png', '-r', String(dpi), '-f', '1', '-l', String(maxPages), pdfPath, outPrefix]);
+              } catch (ppmErr: any) {
+                console.warn('❌ pdftoppm no disponible o falló:', ppmErr.message);
+                console.warn('💡 Instala Poppler y agrega pdftoppm al PATH. Windows: instalar Poppler para Windows.');
+                throw new Error('pdftoppm_not_available');
+              }
+
+              // Recolectar imágenes generadas
+              const imageBuffers: Buffer[] = [];
+              for (let i = 1; i <= maxPages; i++) {
+                const imgPath = `${outPrefix}-${i}.png`;
+                try {
+                  const buf = await fs.readFile(imgPath);
+                  imageBuffers.push(buf);
+                } catch {}
+              }
+
+              if (imageBuffers.length === 0) {
+                throw new Error('no_images_generated');
+              }
+
+              // OCR con tesseract.js (lazy import)
+              try {
+                const tesseract: any = await import('tesseract.js');
+                const ocrTexts: string[] = [];
+                for (let idx = 0; idx < imageBuffers.length; idx++) {
+                  console.log(`🔤 OCR página ${idx + 1}/${imageBuffers.length} (DPI=${dpi}, lang=${lang})`);
+                  const res = await (tesseract as any).recognize(imageBuffers[idx], lang);
+                  const pageText = String(res?.data?.text || '').trim();
+                  if (pageText) ocrTexts.push(pageText);
+                }
+
+                const ocrCombined = ocrTexts.join('\n\n').trim();
+                if (ocrCombined.length > 0) {
+                  const finalText = ocrCombined.slice(0, maxLength);
+                  try { await fs.unlink(pdfPath); } catch {}
+                  // Intentar borrar imágenes (best-effort)
+                  for (let i = 1; i <= imageBuffers.length; i++) {
+                    try { await fs.unlink(`${outPrefix}-${i}.png`); } catch {}
+                  }
+                  console.log(`✅ OCR exitoso. Caracteres extraídos: ${finalText.length}`);
+                  return {
+                    text: finalText,
+                    metadata: {
+                      format: 'pdf',
+                      method: 'ocr_pdftoppm_tesseract',
+                      pages_ocr: imageBuffers.length,
+                      dpi: dpi,
+                      lang: lang,
+                      truncated: ocrCombined.length > maxLength,
+                      size: buffer.byteLength,
+                      note: 'Texto obtenido por OCR de imágenes renderizadas desde PDF'
+                    }
+                  };
+                }
+              } catch (ocrErr: any) {
+                if (ocrErr?.code === 'ERR_MODULE_NOT_FOUND' || /Cannot find module/.test(String(ocrErr?.message || ''))) {
+                  console.warn('❌ tesseract.js no está instalado. Ejecuta: npm install tesseract.js');
+                } else {
+                  console.warn('❌ Error durante OCR:', ocrErr?.message || ocrErr);
+                }
+              } finally {
+                // Limpieza best-effort
+                try { await fs.unlink(pdfPath); } catch {}
+              }
+            } catch (ocrSetupErr: any) {
+              console.warn('⚠️ OCR no se pudo ejecutar:', ocrSetupErr?.message || ocrSetupErr);
+            }
+          }
+
           // Si todo falla
           console.log('❌ No se pudo extraer texto del PDF con ningún método');
           console.log(`📊 Resumen final: BT/ET: ${btCount}, Paréntesis: ${parenthesesCount}, Tj: ${tjCount}, Arrays: ${arrayCount}, Streams: ${textStreams.length}`);
@@ -528,7 +623,7 @@ Posibles causas:
               compressed: hasFlateDecode,
               streams_found: textStreams.length,
               note: 'PDF sin texto extraíble - posiblemente escaneado o protegido',
-              solution: 'Usar OCR o convertir PDF a texto externamente',
+              solution: 'Habilitar OCR (ENABLE_PDF_OCR=1) e instalar Poppler (pdftoppm) y tesseract.js',
               patterns_found: { bt_et: btCount, parentheses: parenthesesCount, tj: tjCount, arrays: arrayCount }
             }
           };
