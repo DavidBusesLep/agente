@@ -1391,7 +1391,38 @@ app.post('/ai/answer', async (req, reply) => {
     // Continúa a siguiente ronda; el loop hará una nueva llamada con resultados agregados
   }
 
-  const finalAnswer = assistantMessage?.content ?? '';
+  let finalAnswer = assistantMessage?.content ?? '';
+
+  // Si el último mensaje no tiene contenido (p.ej., se quedó en tool_calls), forzar una ronda final sin tools
+  if (!finalAnswer || String(finalAnswer).trim().length === 0) {
+    try {
+      const finalizeMessages = [
+        ...messages,
+        { role: 'system', content: 'Ahora genera una respuesta final y concisa basada en los resultados de herramientas previas. No solicites más herramientas.' } as any
+      ];
+      const finalizeReq: any = {
+        model: model.name,
+        messages: finalizeMessages,
+        temperature: temperature,
+        max_tokens: maxTokens
+      };
+      // Aplicar knobs GPT-5 si corresponde
+      if (model.name.toLowerCase().startsWith('gpt-5')) {
+        const settingsObj: any = settings || {};
+        if (settingsObj.gpt5ReasoningEffort) finalizeReq.reasoning = { effort: settingsObj.gpt5ReasoningEffort };
+        if (settingsObj.gpt5Verbosity) finalizeReq.verbosity = settingsObj.gpt5Verbosity;
+      }
+      const finalizeResp = await createChatCompletionAdaptive(finalizeReq);
+      finalAnswer = finalizeResp.choices?.[0]?.message?.content ?? '';
+      if (!finalAnswer || String(finalAnswer).trim().length === 0) {
+        // Último recurso: mensaje genérico
+        finalAnswer = 'He obtenido y procesado los resultados de las herramientas. ¿Deseas que te resuma y priorice las opciones?';
+      }
+      messages = finalizeMessages as any;
+    } catch (e) {
+      finalAnswer = 'Se ejecutaron las herramientas correctamente. Por favor confirma si deseas que presente un resumen con las mejores opciones.';
+    }
+  }
 
   // 8-9. Usage logging and billing
   const tokensIn = estimateMessagesTokens(messages);
