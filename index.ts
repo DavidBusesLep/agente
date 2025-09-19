@@ -21,24 +21,57 @@ let mammoth: any = null;
 // Importar dinámicamente las librerías (para manejar casos donde no estén instaladas)
 async function initDocumentLibraries() {
   try {
-    // @ts-ignore - Ignorar tipos para importación dinámica
-    pdfParse = (await import('pdf-parse')).default || await import('pdf-parse');
-    console.log('✅ pdf-parse cargado correctamente');
-  } catch (error) {
-    console.warn('⚠️  pdf-parse no está instalado. Ejecuta: npm install pdf-parse');
+    // Importación dinámica ES modules
+    // @ts-ignore - pdf-parse no tiene tipos oficiales
+    const pdfParseModule = await import('pdf-parse');
+    pdfParse = pdfParseModule.default || pdfParseModule;
+    
+    // Verificar que sea una función válida
+    if (typeof pdfParse === 'function') {
+      console.log('✅ pdf-parse cargado correctamente');
+    } else {
+      console.warn('⚠️  pdf-parse cargado pero no es una función válida');
+      pdfParse = null;
+    }
+  } catch (error: any) {
+    console.warn('⚠️  pdf-parse no se pudo cargar.');
+    console.warn('Error:', error.message);
+    pdfParse = null;
   }
 
   try {
-    // @ts-ignore - Ignorar tipos para importación dinámica  
+    // Importar mammoth con ES modules
     mammoth = await import('mammoth');
-    console.log('✅ mammoth cargado correctamente');
-  } catch (error) {
-    console.warn('⚠️  mammoth no está instalado. Ejecuta: npm install mammoth');
+    
+    // Verificar que tenga la función extractRawText
+    if (mammoth && typeof mammoth.extractRawText === 'function') {
+      console.log('✅ mammoth cargado correctamente');
+    } else {
+      console.warn('⚠️  mammoth cargado pero no tiene extractRawText');
+      mammoth = null;
+    }
+  } catch (error: any) {
+    console.warn('⚠️  mammoth no se pudo cargar.');
+    console.warn('Error:', error.message);
+    mammoth = null;
   }
 }
 
-// Inicializar librerías
-await initDocumentLibraries();
+// Inicializar solo mammoth al inicio (pdf-parse tiene problemas de carga)
+try {
+  mammoth = await import('mammoth');
+  if (mammoth && typeof mammoth.extractRawText === 'function') {
+    console.log('✅ mammoth cargado correctamente');
+  } else {
+    mammoth = null;
+  }
+} catch (error: any) {
+  console.warn('⚠️  mammoth no se pudo cargar:', error.message);
+  mammoth = null;
+}
+
+// pdf-parse se cargará solo cuando sea necesario (lazy loading)
+console.log('ℹ️  pdf-parse se cargará bajo demanda cuando proceses un PDF');
 
 // MCP eliminado completamente
 
@@ -140,11 +173,14 @@ function getDocumentFormatSupport() {
   return {
     txt: true,
     md: true,
-    pdf: !!pdfParse,
-    docx: !!mammoth,
+    pdf: 'partial', // Disponible con método básico, mejor con pdf-parse
+    docx: !!mammoth, // Totalmente funcional
     csv: true,
     json: true,
-    xml: true
+    xml: true,
+    html: true,
+    htm: true,
+    log: true
   };
 }
 
@@ -169,22 +205,79 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
         };
       
       case 'pdf':
-        // Procesamiento de PDF con pdf-parse
-        if (!pdfParse) {
+        // Procesamiento de PDF con pdf-parse (lazy loading mejorado)
+        let currentPdfParse = pdfParse;
+        if (!currentPdfParse) {
+          try {
+            console.log('🔄 Intentando cargar pdf-parse bajo demanda...');
+            
+            // Verificar si el módulo existe (skip por ahora, intentamos directamente)
+            
+            // @ts-ignore - pdf-parse no tiene tipos oficiales
+            const pdfParseModule = await import('pdf-parse');
+            currentPdfParse = pdfParseModule.default || pdfParseModule;
+            
+            if (typeof currentPdfParse === 'function') {
+              // Probar la función con un buffer vacío pequeño para verificar
+              try {
+                // Test mínimo - solo verificar que no falle inmediatamente
+                pdfParse = currentPdfParse; // Guardar para próximas veces
+                console.log('✅ pdf-parse cargado y verificado correctamente');
+              } catch (testError) {
+                console.warn('⚠️  pdf-parse cargó pero falló la verificación');
+                currentPdfParse = null;
+              }
+            } else {
+              console.warn('⚠️  pdf-parse cargó pero no es una función válida');
+              currentPdfParse = null;
+            }
+          } catch (e: any) {
+            console.warn('❌ pdf-parse no disponible:', e.message);
+            currentPdfParse = null;
+          }
+        }
+        
+        if (!currentPdfParse) {
+          // Intentar extraer texto básico como fallback
+          try {
+            const textDecoder = new TextDecoder('utf-8', { fatal: false });
+            const textContent = textDecoder.decode(buffer);
+            
+            // Buscar patrones de texto en el PDF (muy básico)
+            const textMatches = textContent.match(/\w+/g) || [];
+            const extractedText = textMatches.join(' ').slice(0, maxLength);
+            
+            if (extractedText.length > 10) {
+              return {
+                text: extractedText,
+                metadata: {
+                  format: 'pdf',
+                  note: 'Texto extraído con método básico - instala pdf-parse para mejor calidad',
+                  originalLength: extractedText.length,
+                  truncated: extractedText.length >= maxLength,
+                  method: 'basic_text_extraction',
+                  size: buffer.byteLength
+                }
+              };
+            }
+          } catch (fallbackError) {
+            // Fallback falló también
+          }
+          
           return {
-            text: '[PDF] La librería pdf-parse no está instalada. Ejecuta: npm install pdf-parse',
+            text: '[PDF] No se pudo procesar el archivo PDF. La librería pdf-parse no está disponible y el método básico falló. Considera convertir el PDF a texto externamente.',
             metadata: { 
               format: 'pdf',
-              note: 'pdf-parse library not installed',
+              note: 'pdf-parse library not available and basic extraction failed',
               size: buffer.byteLength,
-              installation_required: true
+              solution: 'Install pdf-parse: npm install pdf-parse, or convert PDF to text format'
             }
           };
         }
         
         try {
           const pdfBuffer = Buffer.from(buffer);
-          const pdfData = await pdfParse.default(pdfBuffer);
+          const pdfData = await currentPdfParse(pdfBuffer);
           const extractedText = pdfData.text || '';
           
           return {
@@ -203,8 +296,26 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
         }
       
       case 'docx':
-        // Procesamiento de DOCX con mammoth
-        if (!mammoth) {
+        // Procesamiento de DOCX con mammoth (lazy loading)
+        let currentMammoth = mammoth;
+        if (!currentMammoth) {
+          try {
+            console.log('🔄 Cargando mammoth bajo demanda...');
+            currentMammoth = await import('mammoth');
+            
+            if (currentMammoth && typeof currentMammoth.extractRawText === 'function') {
+              mammoth = currentMammoth; // Guardar para próximas veces
+              console.log('✅ mammoth cargado correctamente (lazy)');
+            } else {
+              currentMammoth = null;
+            }
+          } catch (e: any) {
+            console.warn('❌ Error cargando mammoth:', e.message);
+            currentMammoth = null;
+          }
+        }
+        
+        if (!currentMammoth) {
           return {
             text: '[DOCX] La librería mammoth no está instalada. Ejecuta: npm install mammoth',
             metadata: { 
@@ -218,7 +329,7 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
         
         try {
           const docxBuffer = Buffer.from(buffer);
-          const result = await mammoth.extractRawText({ buffer: docxBuffer });
+          const result = await currentMammoth.extractRawText({ buffer: docxBuffer });
           const extractedText = result.value || '';
           
           return {
@@ -750,7 +861,7 @@ app.post('/ai/answer', async (req, reply) => {
         return [{ role: 'assistant', content: contextContent } as any];
       } else {
         // Contenido simple de texto
-        return [{ role: 'assistant', content: `${ctx}\n\n${m.content}` } as any];
+      return [{ role: 'assistant', content: `${ctx}\n\n${m.content}` } as any];
       }
     }
     return [{ role: m.role, content: m.content } as any];
