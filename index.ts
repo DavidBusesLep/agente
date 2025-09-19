@@ -201,40 +201,90 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
             try {
               console.log('🔄 Intentando extraer streams comprimidos...');
               
-              // Buscar objetos stream comprimidos
-              const streamPattern = /stream\s*([\s\S]*?)\s*endstream/g;
+              // Método 1: Buscar streams con mejor precisión usando buffer original
+              const streamPattern = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
               let streamMatch;
               let streamCount = 0;
               
               while ((streamMatch = streamPattern.exec(textContent)) !== null && streamCount < 10) {
                 streamCount++;
                 const streamData = streamMatch[1];
-                console.log(`📦 Stream ${streamCount} encontrado, tamaño: ${streamData.length} bytes`);
+                console.log(`📦 Stream ${streamCount} encontrado, tamaño: ${streamData.length} caracteres`);
                 
                 try {
-                  // Intentar descomprimir con zlib (Node.js built-in)
-                  const { inflateSync } = await import('zlib');
+                  // Método A: Intentar con diferentes encodings
+                  const { inflateSync, inflateRawSync } = await import('zlib');
                   
-                  // Convertir string a buffer para descompresión
-                  const compressedBuffer = Buffer.from(streamData, 'binary');
-                  const decompressed = inflateSync(compressedBuffer);
-                  const decompressedText = decompressed.toString('utf-8');
-                  
-                  console.log(`✅ Stream ${streamCount} descomprimido: ${decompressedText.length} caracteres`);
-                  console.log(`🔍 Contenido descomprimido: "${decompressedText.slice(0, 200)}..."`);
-                  
-                  // Buscar texto en el contenido descomprimido
-                  const textInStream = decompressedText.match(/\((.*?)\)/g) || [];
-                  textInStream.forEach(match => {
-                    const text = match.slice(1, -1); // Remover paréntesis
-                    if (text.length > 2 && /[a-zA-Z\s]/.test(text)) {
-                      textStreams.push(text);
-                      console.log(`📝 Texto encontrado en stream: "${text}"`);
+                  // Intentar múltiples métodos de conversión
+                  const methods = [
+                    () => Buffer.from(streamData, 'binary'),
+                    () => Buffer.from(streamData, 'latin1'),
+                    () => {
+                      // Extraer bytes reales del stream usando posición en buffer original
+                      const bufferData = Buffer.from(buffer);
+                      const streamStart = bufferData.indexOf(Buffer.from('stream\n')) + 7;
+                      const streamEnd = bufferData.indexOf(Buffer.from('endstream'), streamStart);
+                      return bufferData.slice(streamStart, streamEnd);
                     }
-                  });
+                  ];
+                  
+                  let decompressed = null;
+                  let methodUsed = '';
+                  
+                  for (let i = 0; i < methods.length; i++) {
+                    try {
+                      const compressedBuffer = methods[i]();
+                      console.log(`🔧 Intentando método ${i + 1}, buffer size: ${compressedBuffer.length}`);
+                      
+                      // Intentar inflateSync primero, luego inflateRawSync
+                      try {
+                        decompressed = inflateSync(compressedBuffer);
+                        methodUsed = `método ${i + 1} + inflateSync`;
+                        break;
+                      } catch {
+                        decompressed = inflateRawSync(compressedBuffer);
+                        methodUsed = `método ${i + 1} + inflateRawSync`;
+                        break;
+                      }
+                    } catch (methodError: any) {
+                      console.log(`⚠️ Método ${i + 1} falló: ${methodError.message}`);
+                    }
+                  }
+                  
+                  if (decompressed) {
+                    const decompressedText = decompressed.toString('utf-8');
+                    console.log(`✅ Stream ${streamCount} descomprimido con ${methodUsed}: ${decompressedText.length} caracteres`);
+                    console.log(`🔍 Contenido descomprimido: "${decompressedText.slice(0, 200)}..."`);
+                    
+                    // Buscar texto en el contenido descomprimido usando múltiples patrones
+                    const textPatterns = [
+                      /\((.*?)\)/g,  // Texto en paréntesis
+                      /BT\s+(.*?)\s+ET/gs,  // Bloques de texto
+                      /Tj\s*\((.*?)\)/g,  // Comandos Tj
+                      /TJ\s*\[(.*?)\]/g   // Arrays de texto
+                    ];
+                    
+                    textPatterns.forEach((pattern, index) => {
+                      const matches = decompressedText.match(pattern) || [];
+                      matches.forEach(match => {
+                        let text = '';
+                        if (index === 0) text = match.slice(1, -1); // Paréntesis
+                        else if (index === 1) text = match.replace(/BT\s+|\s+ET/g, ''); // BT/ET
+                        else if (index === 2) text = match.match(/\((.*?)\)/)?.[1] || ''; // Tj
+                        else if (index === 3) text = match.slice(3, -1); // TJ array
+                        
+                        if (text.length > 2 && /[a-zA-Z\s\u00C0-\u017F]/.test(text)) {
+                          textStreams.push(text);
+                          console.log(`📝 Texto encontrado (patrón ${index + 1}): "${text}"`);
+                        }
+                      });
+                    });
+                  } else {
+                    console.log(`❌ No se pudo descomprimir stream ${streamCount} con ningún método`);
+                  }
                   
                 } catch (decompressError: any) {
-                  console.log(`⚠️ No se pudo descomprimir stream ${streamCount}:`, decompressError.message);
+                  console.log(`⚠️ Error general en stream ${streamCount}:`, decompressError.message);
                 }
               }
               
@@ -311,20 +361,75 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
           console.log(`🔍 Últimos 100 caracteres del texto extraído: "${extractedText.slice(-100)}"`);
           
           
-          // Si no encontramos texto estructurado, buscar palabras sueltas
+          // Si no encontramos texto estructurado, usar métodos de fallback avanzados
           if (extractedText.length < 20) {
-            console.log('⚠️ Texto insuficiente, intentando método de palabras sueltas...');
-            const wordPattern = /\b[a-zA-Z]{3,}\b/g;
+            console.log('⚠️ Texto insuficiente, intentando métodos de fallback avanzados...');
+            
+            const fallbackTexts = [];
+            
+            // Fallback 1: Buscar texto en objetos no comprimidos
+            const uncompressedTextPattern = /\/F\d+\s+\d+\s+Tf.*?\((.*?)\)/g;
+            let fallbackMatch;
+            
+            while ((fallbackMatch = uncompressedTextPattern.exec(textContent)) !== null) {
+              const text = fallbackMatch[1];
+              if (text.length > 2 && /[a-zA-Z\s\u00C0-\u017F]/.test(text)) {
+                fallbackTexts.push(text);
+                console.log(`📝 Texto no comprimido encontrado: "${text}"`);
+              }
+            }
+            
+            // Fallback 2: Buscar metadatos del PDF
+            const metadataPatterns = [
+              { pattern: /\/Title\s*\((.*?)\)/g, name: 'Título' },
+              { pattern: /\/Author\s*\((.*?)\)/g, name: 'Autor' },
+              { pattern: /\/Subject\s*\((.*?)\)/g, name: 'Asunto' },
+              { pattern: /\/Keywords\s*\((.*?)\)/g, name: 'Palabras clave' }
+            ];
+            
+            metadataPatterns.forEach(({ pattern, name }) => {
+              let metaMatch;
+              while ((metaMatch = pattern.exec(textContent)) !== null) {
+                const text = metaMatch[1];
+                if (text.length > 2) {
+                  fallbackTexts.push(`${name}: ${text}`);
+                  console.log(`📋 Metadato encontrado - ${name}: "${text}"`);
+                }
+              }
+            });
+            
+            // Fallback 3: Palabras legibles mejorado
+            const wordPattern = /\b[a-zA-Z\u00C0-\u017F]{3,}\b/g;
             const words = textContent.match(wordPattern) || [];
             console.log(`🔍 Palabras encontradas: ${words.length}`);
+            
             if (words.length > 0) {
-              console.log(`🔍 Primeras 20 palabras: ${words.slice(0, 20).join(', ')}`);
+              const uniqueWords = [...new Set(words)]
+                .filter(word => word.length > 3)
+                .slice(0, 50);
+              
+              if (uniqueWords.length > 0) {
+                fallbackTexts.push(`Palabras clave extraídas: ${uniqueWords.join(', ')}`);
+                console.log(`🔤 Palabras únicas encontradas: ${uniqueWords.length}`);
+                console.log(`🔍 Primeras 10 palabras: ${uniqueWords.slice(0, 10).join(', ')}`);
+              }
             }
-            extractedText = words
-              .filter(word => word.length > 2)
-              .slice(0, 500) // Limitar a las primeras 500 palabras
-              .join(' ');
-            console.log(`📝 Texto de palabras sueltas: ${extractedText.length} caracteres`);
+            
+            // Combinar todos los fallbacks
+            const combinedFallback = fallbackTexts.join('\n\n').trim();
+            
+            if (combinedFallback.length > 0) {
+              extractedText = combinedFallback;
+              console.log(`🔄 Fallback avanzado extrajo: ${extractedText.length} caracteres`);
+              console.log(`📝 Contenido de fallback: "${extractedText.slice(0, 300)}..."`);
+            } else {
+              // Último recurso: palabras básicas
+              extractedText = words
+                .filter(word => word.length > 2)
+                .slice(0, 100)
+                .join(' ');
+              console.log(`📝 Fallback básico (palabras): ${extractedText.length} caracteres`);
+            }
           }
           
           // Truncar si es necesario
@@ -386,13 +491,42 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
           
           // Si todo falla
           console.log('❌ No se pudo extraer texto del PDF con ningún método');
-          console.log(`📊 Resumen: BT/ET: ${btCount}, Paréntesis: ${parenthesesCount}, Tj: ${tjCount}, Arrays: ${arrayCount}`);
+          console.log(`📊 Resumen final: BT/ET: ${btCount}, Paréntesis: ${parenthesesCount}, Tj: ${tjCount}, Arrays: ${arrayCount}, Streams: ${textStreams.length}`);
+          
+          const errorMessage = hasFlateDecode ? 
+            `[PDF COMPRIMIDO] Este PDF usa compresión FlateDecode pero los streams están corruptos o mal formateados.
+
+Detalles técnicos:
+• Tamaño: ${(buffer.byteLength / 1024).toFixed(1)} KB
+• Streams encontrados: ${textStreams.length}
+• Compresión: FlateDecode (zlib/deflate)
+• Estado: Streams no pudieron ser descomprimidos
+
+Posibles soluciones:
+1. Convertir el PDF usando herramientas externas
+2. Usar OCR si es un documento escaneado
+3. Verificar que el archivo no esté corrupto` :
+            
+            `[PDF] Este archivo PDF no contiene texto extraíble o está en un formato no compatible.
+
+Detalles técnicos:
+• Tamaño: ${(buffer.byteLength / 1024).toFixed(1)} KB
+• Elementos encontrados: BT/ET: ${btCount}, Texto: ${parenthesesCount}, Comandos: ${tjCount}
+• Método usado: Parser nativo
+
+Posibles causas:
+1. PDF escaneado (requiere OCR)
+2. PDF protegido o encriptado
+3. Formato PDF no estándar`;
+
           return {
-            text: '[PDF] Este archivo PDF no contiene texto extraíble o está protegido. Considera convertirlo a texto usando herramientas externas o OCR.',
+            text: errorMessage,
             metadata: {
               format: 'pdf',
               size: buffer.byteLength,
-              method: 'extraction_failed',
+              method: hasFlateDecode ? 'extraction_failed_compressed' : 'extraction_failed',
+              compressed: hasFlateDecode,
+              streams_found: textStreams.length,
               note: 'PDF sin texto extraíble - posiblemente escaneado o protegido',
               solution: 'Usar OCR o convertir PDF a texto externamente',
               patterns_found: { bt_et: btCount, parentheses: parenthesesCount, tj: tjCount, arrays: arrayCount }
