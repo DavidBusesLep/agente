@@ -220,15 +220,23 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
               }
 
               try {
-                console.log('🔤 Ejecutando OCR con tesseract.js');
-                const tesseract: any = await import('tesseract.js');
+                console.log('🔤 Ejecutando OCR con tesseract.js (createWorker)');
+                const tesseractModule: any = await import('tesseract.js');
+                const createWorker = (tesseractModule?.createWorker || tesseractModule?.default?.createWorker);
+                if (!createWorker) {
+                  throw new Error('tesseract_createWorker_not_available');
+                }
+                const worker = await createWorker({ logger: (m: any) => { if (m?.status) console.log(`🧠 OCR: ${m.status} ${m.progress ? Math.round(m.progress * 100) + '%' : ''}`); } });
+                await worker.loadLanguage(lang);
+                await worker.initialize(lang);
                 const ocrTexts: string[] = [];
                 for (let idx = 0; idx < imageBuffers.length; idx++) {
                   console.log(`🔤 OCR página ${idx + 1}/${imageBuffers.length} (DPI=${dpi}, lang=${lang})`);
-                  const res = await (tesseract as any).recognize(imageBuffers[idx], lang);
-                  const pageText = String(res?.data?.text || '').trim();
+                  const { data } = await worker.recognize(imageBuffers[idx]);
+                  const pageText = String(data?.text || '').trim();
                   if (pageText) ocrTexts.push(pageText);
                 }
+                await worker.terminate();
                 const ocrCombined = ocrTexts.join('\n\n').trim();
                 // Limpieza best-effort
                 try { await fs.unlink(pdfPath); } catch {}
