@@ -94,6 +94,9 @@ model Settings {
   modelDefault String? @map("model_default")
   aiEndpointUrl String? @map("ai_endpoint_url")
   aiForwardApiKey String? @map("ai_forward_api_key")
+  // GPT-5 specific knobs
+  gpt5ReasoningEffort String? @map("gpt5_reasoning_effort")
+  gpt5Verbosity       String? @map("gpt5_verbosity")
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 

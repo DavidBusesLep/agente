@@ -998,7 +998,10 @@ app.post('/api/settings', { preHandler: authGuard }, async (req: any, reply) => 
     maxTokens: z.number().int().positive().max(4000).optional(),
     modelDefault: z.string().min(1).optional(),
     aiEndpointUrl: z.string().url().optional(),
-    aiForwardApiKey: z.string().optional()
+    aiForwardApiKey: z.string().optional(),
+    // Knobs específicos GPT-5
+    gpt5ReasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
+    gpt5Verbosity: z.enum(['brief', 'balanced', 'verbose']).optional()
   });
   const body = bodySchema.parse(req.body);
   const defaults = {
@@ -1325,13 +1328,25 @@ app.post('/ai/answer', async (req, reply) => {
   const traceLog: any[] = [];
   const contextToolsOut: Array<{ name: string; args: any; result: any }> = [];
   for (let round = 0; round < 16; round++) {
-    const resp = await createChatCompletionAdaptive({
+    const baseReq: any = {
       model: model.name,
       messages,
       temperature: temperature,
       max_tokens: maxTokens,
       tools: toolDefs.length ? toolDefs : undefined
-    });
+    };
+    // Si es gpt-5, aplicar knobs de settings si existen
+    if (model.name.toLowerCase().startsWith('gpt-5')) {
+      const reasoningEffort = (settings as any)?.gpt5ReasoningEffort;
+      const verbosity = (settings as any)?.gpt5Verbosity;
+      if (reasoningEffort) {
+        baseReq.reasoning = { effort: reasoningEffort };
+      }
+      if (verbosity) {
+        baseReq.verbosity = verbosity;
+      }
+    }
+    const resp = await createChatCompletionAdaptive(baseReq);
     assistantMessage = resp.choices[0]?.message;
     if (assistantMessage) messages.push(assistantMessage as any);
     if ((parsed as any).trace) {

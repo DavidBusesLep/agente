@@ -33,6 +33,27 @@
             <label class="text-sm text-gray-600">Max tokens por respuesta</label>
             <input id="settings-max" type="number" min="1" max="4000" class="w-full mt-1 border rounded px-3 py-2" placeholder="1000">
           </div>
+          <div id="gpt5-effort-field" class="hidden">
+            <label class="text-sm text-gray-600">GPT‑5: Reasoning effort</label>
+            <select id="settings-gpt5-effort" class="w-full mt-1 border rounded px-3 py-2">
+              <option value="">(auto)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
+          <div id="gpt5-verbosity-field" class="hidden">
+            <label class="text-sm text-gray-600">GPT‑5: Verbosity</label>
+            <select id="settings-gpt5-verbosity" class="w-full mt-1 border rounded px-3 py-2">
+              <option value="">(auto)</option>
+              <option value="brief">brief</option>
+              <option value="balanced">balanced</option>
+              <option value="verbose">verbose</option>
+            </select>
+          </div>
+          <div id="gpt5-note" class="md:col-span-2 hidden text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded px-3 py-2">
+            Estos controles solo aplican a modelos <b>GPT‑5</b>. Selecciona un modelo GPT‑5 para habilitarlos.
+          </div>
           <div class="md:col-span-2">
             <label class="text-sm text-gray-600">System prompt</label>
             <textarea id="settings-prompt" rows="4" class="w-full mt-1 border rounded px-3 py-2" placeholder="Eres un asistente útil, tu nombre es mirlo"></textarea>
@@ -95,7 +116,13 @@
           document.getElementById('settings-temp').value = settings?.temperature ?? 0.7;
           document.getElementById('settings-max').value = settings?.maxTokens ?? 1000;
           document.getElementById('settings-prompt').value = settings?.systemPrompt ?? 'Eres un asistente útil, tu nombre es mirlo';
+          // GPT-5 knobs
+          const eff = document.getElementById('settings-gpt5-effort');
+          const verb = document.getElementById('settings-gpt5-verbosity');
+          if (eff) eff.value = settings?.gpt5ReasoningEffort || '';
+          if (verb) verb.value = settings?.gpt5Verbosity || '';
           renderCosts();
+          toggleGpt5Fields();
         }catch(e){ console.error(e); }
       }
 
@@ -116,6 +143,17 @@
         }catch(e){ console.error(e); }
       }
 
+      function toggleGpt5Fields(){
+        const sel = document.getElementById('settings-model');
+        const isGpt5 = (sel.value || '').toLowerCase().startsWith('gpt-5');
+        const f1 = document.getElementById('gpt5-effort-field');
+        const f2 = document.getElementById('gpt5-verbosity-field');
+        const note = document.getElementById('gpt5-note');
+        if (f1) f1.classList.toggle('hidden', !isGpt5);
+        if (f2) f2.classList.toggle('hidden', !isGpt5);
+        if (note) note.classList.toggle('hidden', isGpt5);
+      }
+
       async function saveSettings(){
         const body = {
           modelDefault: (document.getElementById('settings-model')).value.trim(),
@@ -123,6 +161,11 @@
           maxTokens: Number((document.getElementById('settings-max')).value),
           systemPrompt: (document.getElementById('settings-prompt')).value
         };
+        // Adjuntar GPT-5 knobs si fueron configurados
+        const eff = (document.getElementById('settings-gpt5-effort'))?.value;
+        const verb = (document.getElementById('settings-gpt5-verbosity'))?.value;
+        if (eff) body.gpt5ReasoningEffort = eff;
+        if (verb) body.gpt5Verbosity = verb;
         const r = await fetch('/api/settings', { method: 'POST', headers: { 'content-type':'application/json' }, body: JSON.stringify(body) });
         if(!r.ok){ alert('Error guardando: ' + await r.text()); return; }
         alert('Configuración guardada');
@@ -176,6 +219,7 @@
       });
 
       document.getElementById('save-settings').addEventListener('click', saveSettings);
+      document.getElementById('settings-model').addEventListener('change', toggleGpt5Fields);
 
       load();
     </script>
