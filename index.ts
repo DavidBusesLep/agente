@@ -1135,6 +1135,16 @@ const TranscriptionRequestSchema = z.object({
   temperature: z.number().min(0).max(1).optional() // 0 = más conservador, 1 = más creativo
 });
 
+// Schema para el endpoint de TTS (texto a voz)
+const TtsRequestSchema = z.object({
+  text: z.string().min(1),
+  model: z.string().optional().default('gpt-4o-mini-tts'),
+  voice: z.string().optional().default('alloy'),
+  format: z.enum(['mp3', 'wav', 'ogg']).optional().default('mp3'),
+  speed: z.number().min(0.25).max(4).optional(),
+  language: z.string().optional().default('es')
+});
+
 // Schema para el endpoint de procesamiento de documentos
 // Formatos soportados: pdf, txt, docx, md
 const DocumentRequestSchema = z.object({
@@ -1587,6 +1597,95 @@ app.post('/ai/transcripcion', async (req, reply) => {
       error: 'Error interno del servidor al procesar la transcripción',
       details: error.message 
     });
+  }
+});
+
+// Endpoint para texto a voz (TTS)
+app.post('/ai/tts', async (req, reply) => {
+  const parsed = TtsRequestSchema.parse(req.body);
+  const tenant = req.tenant!;
+
+  try {
+    // Buscar o crear modelo TTS
+    let ttsModel = await prisma.model.findFirst({ where: { name: parsed.model, isActive: true } });
+    if (!ttsModel) {
+      ttsModel = await prisma.model.create({
+        data: {
+          provider: 'openai',
+          name: parsed.model,
+          inputCostPerMillion: new Prisma.Decimal('10.00'),
+          outputCostPerMillion: new Prisma.Decimal('0.00'),
+          isActive: true
+        }
+      });
+    }
+
+    // Llamada a OpenAI TTS (Audio Speech API)
+    const response = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: parsed.model,
+        voice: parsed.voice,
+        input: parsed.text,
+        format: parsed.format,
+        speed: parsed.speed
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      reply.code(500).send({ error: 'Error en TTS', details: errText });
+      return;
+    }
+
+    const audioArrayBuffer = await response.arrayBuffer();
+    const audioBase64 = Buffer.from(audioArrayBuffer).toString('base64');
+
+    // Facturación simple por caracteres
+    const charCount = parsed.text.length;
+    const estimatedCost = (charCount / 1000) * 0.02; // $0.02 por 1K chars (aprox)
+
+    if (new Prisma.Decimal(estimatedCost).gt(tenant.balance)) {
+      reply.code(402).send({ error: 'Saldo insuficiente para TTS' });
+      return;
+    }
+
+    await prisma.$transaction(async tx => {
+      const fresh = await tx.tenant.findUnique({ where: { id: tenant.id }, select: { balance: true } });
+      if (!fresh || fresh.balance.lt(estimatedCost)) {
+        throw Object.assign(new Error('Saldo insuficiente'), { httpStatus: 402 });
+      }
+      await tx.usageLog.create({
+        data: {
+          tenantId: tenant.id,
+          modelId: ttsModel!.id,
+          tokensIn: charCount,
+          tokensOut: 0,
+          costUsd: new Prisma.Decimal(estimatedCost)
+        }
+      });
+      await tx.tenant.update({ where: { id: tenant.id }, data: { balance: fresh.balance.minus(estimatedCost) } });
+    });
+
+    reply.send({
+      format: parsed.format,
+      model_used: parsed.model,
+      voice: parsed.voice,
+      audio_base64: audioBase64,
+      length_chars: charCount,
+      cost_usd: estimatedCost
+    });
+  } catch (error: any) {
+    if (error?.httpStatus === 402) {
+      reply.code(402).send({ error: 'Saldo insuficiente' });
+      return;
+    }
+    console.error('Error en TTS:', error);
+    reply.code(500).send({ error: 'Error interno en TTS', details: error?.message });
   }
 });
 
