@@ -226,7 +226,8 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
                 if (!createWorker) {
                   throw new Error('tesseract_createWorker_not_available');
                 }
-                const worker = await createWorker({ logger: (m: any) => { if (m?.status) console.log(`🧠 OCR: ${m.status} ${m.progress ? Math.round(m.progress * 100) + '%' : ''}`); } });
+                // Evitar pasar funciones en opciones para no romper la clonación al worker
+                const worker = await createWorker();
                 await worker.loadLanguage(lang);
                 await worker.initialize(lang);
                 const ocrTexts: string[] = [];
