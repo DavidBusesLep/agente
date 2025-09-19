@@ -422,25 +422,53 @@ app.post('/ai/answer', async (req, reply) => {
   const temperature = settings?.temperature ?? 0.7;
   const maxTokens = settings?.maxTokens ?? 1000;
 
-  // 1-2. Validate model (use settings default if not provided)
-  const modelName = parsed.model ?? settings?.modelDefault ?? 'gpt-4.1-mini';
-  const model = await prisma.model.findFirst({ where: { name: modelName, isActive: true } });
-  if (!model) {
-    reply.code(400).send({ error: 'Modelo no disponible' });
-    return;
-  }
-
-  // 3. Verificar si la conversación contiene imágenes y si el modelo las soporta
+  // 1-2. Detectar si la conversación contiene imágenes
   const hasImages = parsed.conversation.some(msg => 
     Array.isArray(msg.content) && 
     msg.content.some((item: any) => item.type === 'image_url')
   );
+
+  // 3. Selección inteligente de modelo
+  const visionModels = ['gpt-4o', 'gpt-4o-mini', 'gpt-4-vision-preview'];
+  let modelName: string;
   
-  const visionModels = ['gpt-4-vision-preview', 'gpt-4o', 'gpt-4o-mini'];
+  if (parsed.model) {
+    // Si se especifica modelo manualmente, usarlo
+    modelName = parsed.model;
+  } else if (hasImages) {
+    // Si hay imágenes, buscar el mejor modelo Vision disponible
+    const availableVisionModel = await prisma.model.findFirst({ 
+      where: { 
+        name: { in: visionModels }, 
+        isActive: true 
+      },
+      orderBy: { name: 'asc' } // Preferir gpt-4o por orden alfabético
+    });
+    
+    if (!availableVisionModel) {
+      reply.code(400).send({ 
+        error: 'No hay modelos compatibles con imágenes disponibles',
+        available_vision_models: visionModels
+      });
+      return;
+    }
+    modelName = availableVisionModel.name;
+  } else {
+    // Sin imágenes, usar modelo por defecto del tenant
+    modelName = settings?.modelDefault ?? 'gpt-4.1-mini';
+  }
+
+  const model = await prisma.model.findFirst({ where: { name: modelName, isActive: true } });
+  if (!model) {
+    reply.code(400).send({ error: `Modelo no disponible: ${modelName}` });
+    return;
+  }
+
+  // 4. Verificación final: asegurar compatibilidad imagen-modelo
   if (hasImages && !visionModels.includes(model.name)) {
     reply.code(400).send({ 
-      error: 'El modelo seleccionado no soporta imágenes',
-      suggestion: 'Usa uno de estos modelos para procesar imágenes: ' + visionModels.join(', ')
+      error: `El modelo ${model.name} no soporta imágenes`,
+      suggestion: 'Los modelos compatibles con imágenes son: ' + visionModels.join(', ')
     });
     return;
   }
@@ -583,7 +611,10 @@ app.post('/ai/answer', async (req, reply) => {
 
   // 10. Return response (devolver context_tools para próxima llamada)
   reply.send({
-    answer: { role: 'assistant', context_tools: contextToolsOut, content: finalAnswer }
+    answer: { role: 'assistant', context_tools: contextToolsOut, content: finalAnswer },
+    model_used: model.name,
+    auto_selected: !parsed.model && hasImages ? true : undefined,
+    has_images: hasImages
   });
 });
 
