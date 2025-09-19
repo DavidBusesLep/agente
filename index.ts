@@ -14,6 +14,32 @@ import { randomUUID } from 'node:crypto';
 // SQL Server (para tools locales)
 import { getOpenAiToolDefs, executeLocalTool } from './src/tools/localTools';
 
+// Librerías para procesamiento de documentos (importación dinámica con tipos any)
+let pdfParse: any = null;
+let mammoth: any = null;
+
+// Importar dinámicamente las librerías (para manejar casos donde no estén instaladas)
+async function initDocumentLibraries() {
+  try {
+    // @ts-ignore - Ignorar tipos para importación dinámica
+    pdfParse = (await import('pdf-parse')).default || await import('pdf-parse');
+    console.log('✅ pdf-parse cargado correctamente');
+  } catch (error) {
+    console.warn('⚠️  pdf-parse no está instalado. Ejecuta: npm install pdf-parse');
+  }
+
+  try {
+    // @ts-ignore - Ignorar tipos para importación dinámica  
+    mammoth = await import('mammoth');
+    console.log('✅ mammoth cargado correctamente');
+  } catch (error) {
+    console.warn('⚠️  mammoth no está instalado. Ejecuta: npm install mammoth');
+  }
+}
+
+// Inicializar librerías
+await initDocumentLibraries();
+
 // MCP eliminado completamente
 
 // Very rough token estimator: ~4 chars per token
@@ -37,6 +63,10 @@ function estimateTokensFromContent(content: any): number {
         // ~85 tokens para baja resolución
         const detail = item.image_url?.detail || 'auto';
         return sum + (detail === 'low' ? 85 : 765);
+      } else if (item.type === 'document_url') {
+        // Estimación aproximada para documentos: basada en max_length
+        const maxLength = item.document_url?.max_length || 10000;
+        return sum + estimateTokensFromText('x'.repeat(Math.min(maxLength, 10000)));
       }
       return sum;
     }, 0);
@@ -103,6 +133,175 @@ async function ensureDefaultModels() {
 
 function generateApiKey(): string {
   return randomUUID().replace(/-/g, '') + Math.random().toString(16).slice(2);
+}
+
+// Función para verificar compatibilidad de formatos
+function getDocumentFormatSupport() {
+  return {
+    txt: true,
+    md: true,
+    pdf: !!pdfParse,
+    docx: !!mammoth,
+    csv: true,
+    json: true,
+    xml: true
+  };
+}
+
+// Función para extraer texto de documentos
+async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, maxLength: number = 10000): Promise<{ text: string; metadata: any }> {
+  const extension = filename.split('.').pop()?.toLowerCase() || '';
+  
+  try {
+    switch (extension) {
+      case 'txt':
+      case 'md':
+        // Archivos de texto plano
+        const textDecoder = new TextDecoder('utf-8');
+        const text = textDecoder.decode(buffer);
+        return {
+          text: text.slice(0, maxLength),
+          metadata: { 
+            format: extension,
+            originalLength: text.length,
+            truncated: text.length > maxLength
+          }
+        };
+      
+      case 'pdf':
+        // Procesamiento de PDF con pdf-parse
+        if (!pdfParse) {
+          return {
+            text: '[PDF] La librería pdf-parse no está instalada. Ejecuta: npm install pdf-parse',
+            metadata: { 
+              format: 'pdf',
+              note: 'pdf-parse library not installed',
+              size: buffer.byteLength,
+              installation_required: true
+            }
+          };
+        }
+        
+        try {
+          const pdfBuffer = Buffer.from(buffer);
+          const pdfData = await pdfParse.default(pdfBuffer);
+          const extractedText = pdfData.text || '';
+          
+          return {
+            text: extractedText.slice(0, maxLength),
+            metadata: {
+              format: 'pdf',
+              originalLength: extractedText.length,
+              truncated: extractedText.length > maxLength,
+              pages: pdfData.numpages || 'unknown',
+              info: pdfData.info || {},
+              size: buffer.byteLength
+            }
+          };
+        } catch (error: any) {
+          throw new Error(`Error al procesar PDF: ${error.message}`);
+        }
+      
+      case 'docx':
+        // Procesamiento de DOCX con mammoth
+        if (!mammoth) {
+          return {
+            text: '[DOCX] La librería mammoth no está instalada. Ejecuta: npm install mammoth',
+            metadata: { 
+              format: 'docx',
+              note: 'mammoth library not installed',
+              size: buffer.byteLength,
+              installation_required: true
+            }
+          };
+        }
+        
+        try {
+          const docxBuffer = Buffer.from(buffer);
+          const result = await mammoth.extractRawText({ buffer: docxBuffer });
+          const extractedText = result.value || '';
+          
+          return {
+            text: extractedText.slice(0, maxLength),
+            metadata: {
+              format: 'docx',
+              originalLength: extractedText.length,
+              truncated: extractedText.length > maxLength,
+              messages: result.messages || [],
+              size: buffer.byteLength
+            }
+          };
+        } catch (error: any) {
+          throw new Error(`Error al procesar DOCX: ${error.message}`);
+        }
+      
+      case 'csv':
+      case 'json':
+      case 'xml':
+      case 'html':
+      case 'htm':
+      case 'log':
+        // Formatos estructurados que podemos procesar como texto
+        try {
+          const textDecoder = new TextDecoder('utf-8');
+          const text = textDecoder.decode(buffer);
+          return {
+            text: text.slice(0, maxLength),
+            metadata: { 
+              format: extension,
+              originalLength: text.length,
+              truncated: text.length > maxLength,
+              note: `Processed as ${extension.toUpperCase()} text format`
+            }
+          };
+        } catch (error: any) {
+          throw new Error(`Error al procesar archivo ${extension.toUpperCase()}: ${error.message}`);
+        }
+      
+      default:
+        // Último intento como texto plano para formatos desconocidos
+        try {
+          const textDecoder = new TextDecoder('utf-8');
+          const text = textDecoder.decode(buffer);
+          
+          // Verificar si parece ser texto válido
+          const nonPrintableChars = text.replace(/[\x20-\x7E\s]/g, '').length;
+          const textLength = text.length;
+          
+          if (textLength === 0) {
+            throw new Error('El archivo está vacío');
+          }
+          
+          if (nonPrintableChars / textLength > 0.3) {
+            throw new Error('El archivo parece ser binario y no se puede procesar como texto');
+          }
+          
+          return {
+            text: text.slice(0, maxLength),
+            metadata: { 
+              format: extension || 'unknown',
+              originalLength: text.length,
+              truncated: text.length > maxLength,
+              note: 'Processed as plain text (fallback)',
+              quality_warning: nonPrintableChars > 0 ? 'File may contain binary data' : undefined
+            }
+          };
+        } catch (fallbackError: any) {
+          const supportedFormats = Object.entries(getDocumentFormatSupport())
+            .filter(([_, supported]) => supported)
+            .map(([format, _]) => format)
+            .join(', ');
+          
+          throw new Error(
+            `Formato de documento no soportado: ${extension}. ` +
+            `Formatos soportados: ${supportedFormats}. ` +
+            `Error: ${fallbackError.message}`
+          );
+        }
+    }
+  } catch (error: any) {
+    throw new Error(`Error al procesar documento: ${error.message}`);
+  }
 }
 
 async function createChatCompletionAdaptive(params: any) {
@@ -356,7 +555,7 @@ app.post('/tenants/register', async (req, reply) => {
   reply.send(created);
 });
 
-// Schema para contenido multimodal (texto + imágenes)
+// Schema para contenido multimodal (texto + imágenes + documentos)
 const MessageContentSchema = z.union([
   z.string(), // Contenido simple de texto
   z.array(z.union([
@@ -370,8 +569,16 @@ const MessageContentSchema = z.union([
         url: z.string().url(),
         detail: z.enum(['low', 'high', 'auto']).optional().default('auto')
       })
+    }),
+    z.object({
+      type: z.literal('document_url'),
+      document_url: z.object({
+        url: z.string().url(),
+        max_length: z.number().int().positive().max(50000).optional().default(10000),
+        extract_mode: z.enum(['auto', 'text_only']).optional().default('auto')
+      })
     })
-  ])) // Contenido multimodal (array de texto e imágenes)
+  ])) // Contenido multimodal (array de texto, imágenes y documentos)
 ]);
 
 // Input schema para /ai/answer (system se toma de Settings del tenant)
@@ -407,6 +614,17 @@ const TranscriptionRequestSchema = z.object({
   temperature: z.number().min(0).max(1).optional() // 0 = más conservador, 1 = más creativo
 });
 
+// Schema para el endpoint de procesamiento de documentos
+// Formatos soportados: pdf, txt, docx, md
+const DocumentRequestSchema = z.object({
+  mode: z.enum(['extract', 'analyze']), // extract = solo extraer texto, analyze = extraer + analizar
+  document_url: z.string().url(), // URL del documento
+  question: z.string().optional(), // Pregunta específica sobre el documento (para modo analyze)
+  max_length: z.number().int().positive().max(50000).optional().default(10000), // Límite de caracteres a extraer
+  model: z.string().optional(), // Modelo para análisis (se auto-selecciona si no se especifica)
+  language: z.string().optional().default('es') // Idioma para el análisis
+});
+
 // Tools importadas desde src/tools/localTools
 
 app.post('/ai/answer', async (req, reply) => {
@@ -422,10 +640,15 @@ app.post('/ai/answer', async (req, reply) => {
   const temperature = settings?.temperature ?? 0.7;
   const maxTokens = settings?.maxTokens ?? 1000;
 
-  // 1-2. Detectar si la conversación contiene imágenes
+  // 1-2. Detectar si la conversación contiene imágenes o documentos
   const hasImages = parsed.conversation.some(msg => 
     Array.isArray(msg.content) && 
     msg.content.some((item: any) => item.type === 'image_url')
+  );
+  
+  const hasDocuments = parsed.conversation.some(msg => 
+    Array.isArray(msg.content) && 
+    msg.content.some((item: any) => item.type === 'document_url')
   );
 
   // 3. Selección inteligente de modelo
@@ -475,7 +698,48 @@ app.post('/ai/answer', async (req, reply) => {
 
   // Sin tools (MCP/webhook removidos)
 
-  // 4. Build messages (inyectar context_tools globales y por-mensaje, soportar contenido multimodal)
+  // 4. Procesar documentos en la conversación si los hay
+  if (hasDocuments) {
+    for (const message of parsed.conversation) {
+      if (Array.isArray(message.content)) {
+        for (const item of message.content) {
+          if (item.type === 'document_url') {
+            try {
+              // Descargar y extraer texto del documento
+              const documentResponse = await fetch(item.document_url.url);
+              if (!documentResponse.ok) {
+                throw new Error(`No se pudo descargar el documento: ${item.document_url.url}`);
+              }
+              
+              const documentBuffer = await documentResponse.arrayBuffer();
+              const urlPath = new URL(item.document_url.url).pathname;
+              const filename = urlPath.split('/').pop() || 'document.txt';
+              const maxLength = item.document_url.max_length || 10000;
+              
+              const extraction = await extractTextFromDocument(documentBuffer, filename, maxLength);
+              
+              // Reemplazar el document_url con el texto extraído
+              const documentText = `[DOCUMENTO: ${filename}]\n\n${extraction.text}\n\n[FIN DEL DOCUMENTO]`;
+              
+              // Convertir document_url a text con el contenido extraído
+              item.type = 'text' as any;
+              (item as any).text = documentText;
+              delete (item as any).document_url;
+              
+            } catch (error: any) {
+              console.error('Error procesando documento:', error);
+              // En caso de error, convertir a texto con mensaje de error
+              item.type = 'text' as any;
+              (item as any).text = `[ERROR] No se pudo procesar el documento: ${error.message}`;
+              delete (item as any).document_url;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 5. Build messages (inyectar context_tools globales y por-mensaje, soportar contenido multimodal)
   const convMessages: Array<{ role: 'user' | 'assistant'; content: any }> = parsed.conversation.flatMap((m: any) => {
     if (m.role === 'assistant' && Array.isArray(m.context_tools) && m.context_tools.length > 0) {
       const ctx = `Contexto de herramientas previas: ${JSON.stringify(m.context_tools)}`;
@@ -614,7 +878,12 @@ app.post('/ai/answer', async (req, reply) => {
     answer: { role: 'assistant', context_tools: contextToolsOut, content: finalAnswer },
     model_used: model.name,
     auto_selected: !parsed.model && hasImages ? true : undefined,
-    has_images: hasImages
+    has_images: hasImages,
+    has_documents: hasDocuments,
+    processed_content: {
+      images: hasImages,
+      documents: hasDocuments
+    }
   });
 });
 
@@ -787,6 +1056,225 @@ app.post('/ai/transcripcion', async (req, reply) => {
       details: error.message 
     });
   }
+});
+
+// Endpoint para procesamiento de documentos
+app.post('/ai/document', async (req, reply) => {
+  const parsed = DocumentRequestSchema.parse(req.body);
+  const tenant = req.tenant!;
+
+  try {
+    // Descargar el documento desde la URL
+    const documentResponse = await fetch(parsed.document_url);
+    if (!documentResponse.ok) {
+      reply.code(400).send({ error: 'No se pudo descargar el documento desde la URL proporcionada' });
+      return;
+    }
+
+    const documentBuffer = await documentResponse.arrayBuffer();
+    
+    // Detectar nombre del archivo desde la URL
+    const urlPath = new URL(parsed.document_url).pathname;
+    const filename = urlPath.split('/').pop() || 'document.txt';
+    
+    // Extraer texto del documento
+    const extraction = await extractTextFromDocument(documentBuffer, filename, parsed.max_length);
+    
+    if (parsed.mode === 'extract') {
+      // Solo extraer texto, sin análisis con IA
+      const estimatedCost = 0.001; // Costo mínimo por extracción
+      
+      // Verificar saldo
+      if (new Prisma.Decimal(estimatedCost).gt(tenant.balance)) {
+        reply.code(402).send({ error: 'Saldo insuficiente' });
+        return;
+      }
+
+      // Logging de uso
+      await prisma.$transaction(async tx => {
+        const freshTenant = await tx.tenant.findUnique({ 
+          where: { id: tenant.id }, 
+          select: { id: true, balance: true } 
+        });
+        
+        if (!freshTenant || freshTenant.balance.lt(estimatedCost)) {
+          throw Object.assign(new Error('Saldo insuficiente'), { httpStatus: 402 });
+        }
+
+        // Crear un modelo dummy para extracción de documentos si no existe
+        let extractModel = await tx.model.findFirst({ 
+          where: { name: 'document-extract', provider: 'internal' } 
+        });
+        
+        if (!extractModel) {
+          extractModel = await tx.model.create({
+            data: {
+              provider: 'internal',
+              name: 'document-extract',
+              inputCostPerMillion: new Prisma.Decimal('0.001'),
+              outputCostPerMillion: new Prisma.Decimal('0'),
+              isActive: true
+            }
+          });
+        }
+
+        await tx.usageLog.create({
+          data: {
+            tenantId: tenant.id,
+            modelId: extractModel.id,
+            tokensIn: 0,
+            tokensOut: 0,
+            costUsd: new Prisma.Decimal(estimatedCost),
+          }
+        });
+
+        await tx.tenant.update({
+          where: { id: tenant.id },
+          data: { balance: freshTenant.balance.minus(estimatedCost) }
+        });
+      });
+
+      reply.send({
+        mode: 'extract',
+        document_url: parsed.document_url,
+        extracted_text: extraction.text,
+        metadata: extraction.metadata,
+        cost_usd: estimatedCost
+      });
+      return;
+    }
+
+    // Modo 'analyze': extraer texto y analizarlo con IA
+    const settings = await prisma.settings.findUnique({ where: { tenantId: tenant.id } });
+    const systemPrompt = settings?.systemPrompt ?? 'Eres un asistente útil que analiza documentos.';
+    const temperature = settings?.temperature ?? 0.7;
+    const maxTokens = settings?.maxTokens ?? 1000;
+
+    // Seleccionar modelo (usar el por defecto del tenant ya que no hay imágenes)
+    const modelName = parsed.model ?? settings?.modelDefault ?? 'gpt-4.1-mini';
+    const model = await prisma.model.findFirst({ where: { name: modelName, isActive: true } });
+    if (!model) {
+      reply.code(400).send({ error: `Modelo no disponible: ${modelName}` });
+      return;
+    }
+
+    // Construir prompt para análisis
+    const userQuestion = parsed.question || 'Analiza este documento y proporciona un resumen detallado de su contenido.';
+    const analysisPrompt = `Aquí tienes el contenido de un documento para analizar:
+
+--- INICIO DEL DOCUMENTO ---
+${extraction.text}
+--- FIN DEL DOCUMENTO ---
+
+Pregunta del usuario: ${userQuestion}
+
+Por favor, responde en ${parsed.language === 'es' ? 'español' : parsed.language}.`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: analysisPrompt }
+    ];
+
+    // Estimación de costos
+    const estInTokens = estimateMessagesTokens(messages);
+    const estOutTokens = maxTokens;
+    const estimatedCost =
+      (estInTokens * Number(model.inputCostPerMillion)) / 1_000_000 +
+      (estOutTokens * Number(model.outputCostPerMillion)) / 1_000_000;
+
+    if (new Prisma.Decimal(estimatedCost).gt(tenant.balance)) {
+      reply.code(402).send({ error: 'Saldo insuficiente para procesar el análisis' });
+      return;
+    }
+
+    // Llamar a OpenAI para análisis
+    const response = await createChatCompletionAdaptive({
+      model: model.name,
+      messages,
+      temperature: temperature,
+      max_tokens: maxTokens
+    });
+
+    const analysis = response.choices[0]?.message?.content ?? '';
+
+    // Cálculo final de costos
+    const tokensIn = estimateMessagesTokens(messages);
+    const tokensOut = estimateTokensFromText(analysis);
+    const finalCost =
+      (tokensIn * Number(model.inputCostPerMillion)) / 1_000_000 +
+      (tokensOut * Number(model.outputCostPerMillion)) / 1_000_000;
+
+    // Logging de uso y facturación
+    await prisma.$transaction(async tx => {
+      const freshTenant = await tx.tenant.findUnique({ 
+        where: { id: tenant.id }, 
+        select: { id: true, balance: true } 
+      });
+      
+      if (!freshTenant || freshTenant.balance.lt(finalCost)) {
+        throw Object.assign(new Error('Saldo insuficiente'), { httpStatus: 402 });
+      }
+
+      await tx.usageLog.create({
+        data: {
+          tenantId: tenant.id,
+          modelId: model.id,
+          tokensIn: tokensIn,
+          tokensOut: tokensOut,
+          costUsd: new Prisma.Decimal(finalCost),
+        }
+      });
+
+      await tx.tenant.update({
+        where: { id: tenant.id },
+        data: { balance: freshTenant.balance.minus(finalCost) }
+      });
+    });
+
+    reply.send({
+      mode: 'analyze',
+      document_url: parsed.document_url,
+      question: userQuestion,
+      extracted_text: extraction.text,
+      analysis: analysis,
+      metadata: extraction.metadata,
+      model_used: model.name,
+      cost_usd: finalCost,
+      tokens_used: { input: tokensIn, output: tokensOut }
+    });
+
+  } catch (error: any) {
+    console.error('Error en procesamiento de documento:', error);
+    reply.code(500).send({ 
+      error: 'Error interno del servidor al procesar el documento',
+      details: error.message 
+    });
+  }
+});
+
+// Endpoint para consultar formatos de documento soportados
+app.get('/ai/document/formats', async (_req, reply) => {
+  const formatSupport = getDocumentFormatSupport();
+  const installationInstructions: Record<string, string> = {
+    pdf: 'npm install pdf-parse',
+    docx: 'npm install mammoth'
+  };
+  
+  reply.send({
+    supported_formats: formatSupport,
+    installation_instructions: Object.entries(formatSupport)
+      .filter(([format, supported]) => !supported && installationInstructions[format])
+      .reduce((acc, [format, _]) => ({
+        ...acc,
+        [format]: installationInstructions[format]
+      }), {}),
+    fully_supported: Object.entries(formatSupport)
+      .filter(([_, supported]) => supported)
+      .map(([format, _]) => format),
+    requires_installation: Object.entries(formatSupport)
+      .filter(([_, supported]) => !supported)
+      .map(([format, _]) => format)
+  });
 });
 
 async function main() {
