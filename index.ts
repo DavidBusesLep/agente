@@ -228,6 +228,7 @@ async function extractTextFromDocument(buffer: ArrayBuffer, filename: string, ma
                 }
                 // Evitar pasar funciones en opciones para no romper la clonación al worker
                 const worker = await createWorker();
+                await worker.load();
                 await worker.loadLanguage(lang);
                 await worker.initialize(lang);
                 const ocrTexts: string[] = [];
