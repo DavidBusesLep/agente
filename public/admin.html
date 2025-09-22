@@ -23,6 +23,12 @@
       </div>
 
       <div id="panel" class="bg-white rounded shadow overflow-x-auto hidden">
+        <div class="p-4 border-b flex items-center justify-between">
+          <div class="text-sm text-gray-600">Panel de administración</div>
+          <div class="space-x-2">
+            <button id="syncOpenRouter" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded text-sm">Actualizar modelos OpenRouter</button>
+          </div>
+        </div>
         <table class="min-w-full">
           <thead class="bg-gray-100">
             <tr>
@@ -85,6 +91,22 @@
       document.getElementById('logout').addEventListener('click', async () => {
         await fetch('/api/admin/logout', { method: 'POST' });
         location.reload();
+      });
+
+      document.getElementById('syncOpenRouter').addEventListener('click', async () => {
+        const btn = document.getElementById('syncOpenRouter');
+        const prev = btn.innerText;
+        try{
+          btn.disabled = true; btn.innerText = 'Sincronizando...';
+          const r = await fetch('/api/admin/openrouter/models/import', { method: 'POST' });
+          if(!r.ok){ throw new Error(await r.text()); }
+          const data = await r.json();
+          alert(`Modelos OpenRouter sincronizados. Creados: ${data.created}, Actualizados: ${data.updated}.`);
+        }catch(e){
+          alert('Error al sincronizar: ' + (e?.message || e));
+        }finally{
+          btn.disabled = false; btn.innerText = prev;
+        }
       });
 
       load().catch(err => alert('Error: ' + (err?.message || err)));

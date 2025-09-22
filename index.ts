@@ -87,7 +87,14 @@ function estimateMessagesTokens(messages: Array<{ role: string; content: any }>)
 }
 
 const prisma = new PrismaClient();
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY,
+  baseURL: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+  defaultHeaders: {
+    'HTTP-Referer': process.env.OPENROUTER_HTTP_REFERER || 'http://localhost',
+    'X-Title': process.env.OPENROUTER_APP_TITLE || 'TicketSupportV1'
+  }
+});
 const execFileAsync = promisify(execFile);
 
 type TenantAuth = {
@@ -108,35 +115,96 @@ async function ensureDefaultModels() {
   await prisma.model.createMany({
     data: [
       {
-        provider: 'openai',
-        name: 'gpt-4.1-mini',
+        provider: 'openrouter',
+        name: 'openai/gpt-4o-mini',
         inputCostPerMillion: new Prisma.Decimal('0.15'),
         outputCostPerMillion: new Prisma.Decimal('0.60'),
         isActive: true
       },
       {
-        provider: 'openai',
-        name: 'gpt-5',
-        inputCostPerMillion: new Prisma.Decimal('1.00'),
-        outputCostPerMillion: new Prisma.Decimal('3.00'),
+        provider: 'openrouter',
+        name: 'openai/gpt-4o',
+        inputCostPerMillion: new Prisma.Decimal('5.00'),
+        outputCostPerMillion: new Prisma.Decimal('15.00'),
         isActive: true
       },
       {
-        provider: 'openai',
-        name: 'gpt-4-vision-preview',
-        inputCostPerMillion: new Prisma.Decimal('10.00'),
-        outputCostPerMillion: new Prisma.Decimal('30.00'),
+        provider: 'openrouter',
+        name: 'anthropic/claude-3.5-sonnet',
+        inputCostPerMillion: new Prisma.Decimal('3.00'),
+        outputCostPerMillion: new Prisma.Decimal('15.00'),
         isActive: true
       },
       {
-        provider: 'openai',
-        name: 'gpt-4o',
+        provider: 'openrouter',
+        name: 'google/gemini-1.5-pro',
         inputCostPerMillion: new Prisma.Decimal('5.00'),
         outputCostPerMillion: new Prisma.Decimal('15.00'),
         isActive: true
       }
     ]
   });
+}
+
+// Helper para asegurar que un modelo de OpenRouter exista en DB con sus precios
+const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
+
+async function fetchOpenRouterModelsList(): Promise<any[]> {
+  const resp = await fetch(`${OPENROUTER_BASE_URL}/models`, {
+    headers: {
+      'Authorization': `Bearer ${(process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY) ?? ''}`
+    }
+  });
+  if (!resp.ok) {
+    return [];
+  }
+  let data: any;
+  try {
+    data = await resp.json();
+  } catch {
+    data = {} as any;
+  }
+  const list = Array.isArray((data as any).data)
+    ? (data as any).data
+    : (Array.isArray((data as any).models) ? (data as any).models : []);
+  return list;
+}
+
+async function ensureModelRecord(modelName: string) {
+  const existing = await prisma.model.findFirst({ where: { name: modelName, isActive: true } });
+  if (existing) return existing;
+
+  // Intentar obtener precios desde OpenRouter y crear registro
+  try {
+    const models = await fetchOpenRouterModelsList();
+    const found = models.find((m: any) => m?.id === modelName || m?.name === modelName);
+    const pricing = found?.pricing || found?.prices || {};
+    const inputUsdPerMillion = Number(pricing?.prompt ?? pricing?.input ?? 0);
+    const outputUsdPerMillion = Number(pricing?.completion ?? pricing?.output ?? 0);
+
+    const created = await prisma.model.create({
+      data: {
+        provider: 'openrouter',
+        name: modelName,
+        inputCostPerMillion: new Prisma.Decimal(isFinite(inputUsdPerMillion) && inputUsdPerMillion > 0 ? inputUsdPerMillion : 5),
+        outputCostPerMillion: new Prisma.Decimal(isFinite(outputUsdPerMillion) && outputUsdPerMillion > 0 ? outputUsdPerMillion : 15),
+        isActive: true
+      }
+    });
+    return created;
+  } catch {
+    // Fallback: crear con precios por defecto si no se pudo consultar
+    const created = await prisma.model.create({
+      data: {
+        provider: 'openrouter',
+        name: modelName,
+        inputCostPerMillion: new Prisma.Decimal('5.00'),
+        outputCostPerMillion: new Prisma.Decimal('15.00'),
+        isActive: true
+      }
+    });
+    return created;
+  }
 }
 
 function generateApiKey(): string {
@@ -836,6 +904,16 @@ async function createChatCompletionAdaptive(params: any) {
       (retry as any).max_completion_tokens = params.max_tokens;
       return await openai.chat.completions.create(retry as any);
     }
+    if (msg.includes('Unsupported parameter') && msg.includes('reasoning')) {
+      const retry = { ...params };
+      delete (retry as any).reasoning;
+      return await openai.chat.completions.create(retry as any);
+    }
+    if (msg.includes('Unsupported parameter') && msg.includes('verbosity')) {
+      const retry = { ...params };
+      delete (retry as any).verbosity;
+      return await openai.chat.completions.create(retry as any);
+    }
     if (msg.includes('Unsupported parameter') && msg.includes('tool_choice')) {
       const retry = { ...params };
       delete (retry as any).tool_choice;
@@ -936,7 +1014,7 @@ app.post('/auth/signup', async (req, reply) => {
         systemPrompt: 'Eres un asistente útil, tu nombre es mirlo',
         temperature: 0.7,
         maxTokens: 1000,
-        modelDefault: 'gpt-4.1-mini',
+        modelDefault: 'openai/gpt-4o-mini',
         aiEndpointUrl: 'http://181.117.6.16:3000/ai/answer',
         aiForwardApiKey: ''
       }
@@ -1013,7 +1091,7 @@ app.post('/api/settings', { preHandler: authGuard }, async (req: any, reply) => 
     systemPrompt: 'Eres un asistente útil, tu nombre es mirlo',
     temperature: 0.7,
     maxTokens: 1000,
-    modelDefault: 'gpt-4.1-mini',
+    modelDefault: 'openai/gpt-4o-mini',
     aiEndpointUrl: 'http://181.117.6.16:3000/ai/answer',
     aiForwardApiKey: ''
   };
@@ -1032,6 +1110,40 @@ app.get('/api/models', { preHandler: authGuard }, async (_req: any, reply) => {
     select: { name: true, provider: true, inputCostPerMillion: true, outputCostPerMillion: true }
   });
   reply.send({ models });
+});
+
+// Lista dinámica de modelos desde OpenRouter
+app.get('/api/openrouter/models', { preHandler: authGuard }, async (_req: any, reply) => {
+  try {
+    const list: any[] = await fetchOpenRouterModelsList();
+    const models = list.map((m: any) => {
+      const pricing = (m?.pricing ?? m?.prices ?? {}) as any;
+      const promptUsdPerMillion = Number(pricing?.prompt ?? pricing?.input ?? 0) || 0;
+      const completionUsdPerMillion = Number(pricing?.completion ?? pricing?.output ?? 0) || 0;
+      const contextLength = (m?.context_length ?? m?.context_length_tokens ?? m?.context?.length ?? null) as any;
+      const supportsVision = Boolean(
+        (Array.isArray(m?.architecture?.modality) && m.architecture.modality.includes('vision')) ||
+        m?.capabilities?.vision ||
+        (Array.isArray(m?.tags) && m.tags.includes('vision'))
+      );
+      const supportsTools = Boolean(m?.capabilities?.tools || m?.tools);
+      return {
+        id: m?.id ?? m?.name,
+        name: m?.name ?? m?.id,
+        provider: 'openrouter',
+        pricing: {
+          input_per_million: promptUsdPerMillion,
+          output_per_million: completionUsdPerMillion
+        },
+        context_length: contextLength,
+        supports_vision: supportsVision,
+        supports_tools: supportsTools
+      };
+    });
+    reply.send({ models });
+  } catch (error: any) {
+    reply.code(500).send({ error: 'No se pudo obtener modelos de OpenRouter', details: error?.message });
+  }
 });
 
 // Admin: lista de tenants y toggle de toolsEnabled (simple, sin auth fuerte)
@@ -1066,6 +1178,61 @@ app.post('/api/admin/login', async (req, reply) => {
 app.post('/api/admin/logout', async (_req, reply) => {
   reply.clearCookie('admin_auth', { path: '/' });
   reply.send({ ok: true });
+});
+
+// Admin: importar/sincronizar modelos desde OpenRouter
+app.post('/api/admin/openrouter/models/import', async (req, reply) => {
+  const isAdmin = (req as any).cookies?.admin_auth === '1';
+  if (!isAdmin) return reply.code(401).send({ error: 'Unauthorized' });
+
+  // Body opcional: { ids?: string[] }
+  const bodySchema = z.object({ ids: z.array(z.string()).optional() });
+  const body = (() => { try { return bodySchema.parse(req.body || {}); } catch { return { ids: undefined as string[] | undefined }; } })();
+
+  try {
+    const list = await fetchOpenRouterModelsList();
+    const selected = Array.isArray(body.ids) && body.ids.length > 0
+      ? list.filter((m: any) => body.ids!.includes(m?.id || m?.name))
+      : list;
+
+    let created = 0;
+    let updated = 0;
+
+    for (const m of selected) {
+      const idOrName = m?.id || m?.name;
+      if (!idOrName) continue;
+      const pricing = (m?.pricing ?? m?.prices ?? {}) as any;
+      const inputUsdPerMillion = Number(pricing?.prompt ?? pricing?.input ?? 0);
+      const outputUsdPerMillion = Number(pricing?.completion ?? pricing?.output ?? 0);
+
+      const existing = await prisma.model.findFirst({ where: { provider: 'openrouter', name: idOrName } });
+      if (existing) {
+        await prisma.model.update({
+          where: { id: existing.id },
+          data: {
+            inputCostPerMillion: new Prisma.Decimal(isFinite(inputUsdPerMillion) && inputUsdPerMillion > 0 ? inputUsdPerMillion : existing.inputCostPerMillion),
+            outputCostPerMillion: new Prisma.Decimal(isFinite(outputUsdPerMillion) && outputUsdPerMillion > 0 ? outputUsdPerMillion : existing.outputCostPerMillion),
+          }
+        });
+        updated++;
+      } else {
+        await prisma.model.create({
+          data: {
+            provider: 'openrouter',
+            name: idOrName,
+            inputCostPerMillion: new Prisma.Decimal(isFinite(inputUsdPerMillion) && inputUsdPerMillion > 0 ? inputUsdPerMillion : 5),
+            outputCostPerMillion: new Prisma.Decimal(isFinite(outputUsdPerMillion) && outputUsdPerMillion > 0 ? outputUsdPerMillion : 15),
+            isActive: true
+          }
+        });
+        created++;
+      }
+    }
+
+    reply.send({ ok: true, created, updated, scanned: list.length });
+  } catch (error: any) {
+    reply.code(500).send({ error: 'No se pudo importar modelos de OpenRouter', details: error?.message });
+  }
 });
 
 // Tenant registration
@@ -1191,40 +1358,42 @@ app.post('/ai/answer', async (req, reply) => {
   );
 
   // 3. Selección inteligente de modelo
-  const visionModels = ['gpt-4o', 'gpt-4o-mini', 'gpt-4-vision-preview'];
+  const visionModels = [
+    'openai/gpt-4o',
+    'openai/gpt-4o-mini',
+    'openai/gpt-4-vision-preview',
+    'google/gemini-1.5-pro',
+    'anthropic/claude-3.5-sonnet'
+  ];
   let modelName: string;
   
   if (parsed.model) {
     // Si se especifica modelo manualmente, usarlo
     modelName = parsed.model;
   } else if (hasImages) {
-    // Si hay imágenes, buscar el mejor modelo Vision disponible
-    const availableVisionModel = await prisma.model.findFirst({ 
-      where: { 
-        name: { in: visionModels }, 
-        isActive: true 
-      },
-      orderBy: { name: 'asc' } // Preferir gpt-4o por orden alfabético
-    });
-    
-    if (!availableVisionModel) {
+    // Si hay imágenes, intentar preparar algún modelo vision de la lista (creando registro si falta)
+    let selected: string | null = null;
+    for (const candidate of visionModels) {
+      try {
+        await ensureModelRecord(candidate);
+        selected = candidate;
+        break;
+      } catch {}
+    }
+    if (!selected) {
       reply.code(400).send({ 
         error: 'No hay modelos compatibles con imágenes disponibles',
         available_vision_models: visionModels
       });
       return;
     }
-    modelName = availableVisionModel.name;
+    modelName = selected;
   } else {
     // Sin imágenes, usar modelo por defecto del tenant
-    modelName = settings?.modelDefault ?? 'gpt-4.1-mini';
+    modelName = settings?.modelDefault ?? 'openai/gpt-4o-mini';
   }
 
-  const model = await prisma.model.findFirst({ where: { name: modelName, isActive: true } });
-  if (!model) {
-    reply.code(400).send({ error: `Modelo no disponible: ${modelName}` });
-    return;
-  }
+  const model = await ensureModelRecord(modelName);
 
   // 4. Verificación final: asegurar compatibilidad imagen-modelo
   if (hasImages && !visionModels.includes(model.name)) {
@@ -1400,38 +1569,7 @@ app.post('/ai/answer', async (req, reply) => {
     // Continúa a siguiente ronda; el loop hará una nueva llamada con resultados agregados
   }
 
-  let finalAnswer = assistantMessage?.content ?? '';
-
-  // Si el último mensaje no tiene contenido (p.ej., se quedó en tool_calls), forzar una ronda final sin tools
-  if (!finalAnswer || String(finalAnswer).trim().length === 0) {
-    try {
-      const finalizeMessages = [
-        ...messages,
-        { role: 'system', content: 'Ahora genera una respuesta final y concisa basada en los resultados de herramientas previas. No solicites más herramientas.' } as any
-      ];
-      const finalizeReq: any = {
-        model: model.name,
-        messages: finalizeMessages,
-        temperature: temperature,
-        max_tokens: maxTokens
-      };
-      // Aplicar knobs GPT-5 si corresponde
-      if (model.name.toLowerCase().startsWith('gpt-5')) {
-        const settingsObj: any = settings || {};
-        if (settingsObj.gpt5ReasoningEffort) finalizeReq.reasoning = { effort: settingsObj.gpt5ReasoningEffort };
-        if (settingsObj.gpt5Verbosity) finalizeReq.verbosity = settingsObj.gpt5Verbosity;
-      }
-      const finalizeResp = await createChatCompletionAdaptive(finalizeReq);
-      finalAnswer = finalizeResp.choices?.[0]?.message?.content ?? '';
-      if (!finalAnswer || String(finalAnswer).trim().length === 0) {
-        // Último recurso: mensaje genérico
-        finalAnswer = 'He obtenido y procesado los resultados de las herramientas. ¿Deseas que te resuma y priorice las opciones?';
-      }
-      messages = finalizeMessages as any;
-    } catch (e) {
-      finalAnswer = 'Se ejecutaron las herramientas correctamente. Por favor confirma si deseas que presente un resumen con las mejores opciones.';
-    }
-  }
+  const finalAnswer = assistantMessage?.content ?? '';
 
   // 8-9. Usage logging and billing
   const tokensIn = estimateMessagesTokens(messages);
@@ -1837,12 +1975,8 @@ app.post('/ai/document', async (req, reply) => {
     const maxTokens = settings?.maxTokens ?? 1000;
 
     // Seleccionar modelo (usar el por defecto del tenant ya que no hay imágenes)
-    const modelName = parsed.model ?? settings?.modelDefault ?? 'gpt-4.1-mini';
-    const model = await prisma.model.findFirst({ where: { name: modelName, isActive: true } });
-    if (!model) {
-      reply.code(400).send({ error: `Modelo no disponible: ${modelName}` });
-      return;
-    }
+    const modelName = parsed.model ?? settings?.modelDefault ?? 'openai/gpt-4o-mini';
+    const model = await ensureModelRecord(modelName);
 
     // Construir prompt para análisis
     const userQuestion = parsed.question || 'Analiza este documento y proporciona un resumen detallado de su contenido.';
