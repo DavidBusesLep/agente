@@ -1589,10 +1589,11 @@ app.post('/ai/answer', async (req, reply) => {
   const ddEs = String(nowForCtx.getDate()).padStart(2, '0');
   const yyyyEs = nowForCtx.getFullYear();
   const dateCtx = `Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. El año actual es ${yyyyEs}. Para cálculos de fechas usá la función \`get_date_info\` (alias: \`getDateInfo\`). Importante: la fecha ya está resuelta por el sistema. No le pidas al cliente que confirme nuevamente. Usá la fecha tal cual se te entrega en el contexto.`;
+  
+  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${systemPrompt}` : dateCtx;
 
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }> = [
-    { role: 'system', content: dateCtx },
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: enhancedSystemPrompt },
     ...(parsed.context_tools && parsed.context_tools.length
       ? [{ role: 'system', content: `Contexto de herramientas previas: ${JSON.stringify(parsed.context_tools)}` } as any]
       : []),
@@ -2113,10 +2114,11 @@ Por favor, responde en ${parsed.language === 'es' ? 'español' : parsed.language
     const ddEs = String(nowForCtx.getDate()).padStart(2, '0');
     const yyyyEs = nowForCtx.getFullYear();
     const dateCtx = `Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. El año actual es ${yyyyEs}. Para cálculos de fechas usá la función \`get_date_info\` (alias: \`getDateInfo\`). Importante: la fecha ya está resuelta por el sistema. No le pidas al cliente que confirme nuevamente. Usá la fecha tal cual se te entrega en el contexto.`;
+    
+    const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${systemPrompt}` : dateCtx;
 
     const messages = [
-      { role: 'system', content: dateCtx },
-      { role: 'system', content: systemPrompt },
+      { role: 'system', content: enhancedSystemPrompt },
       { role: 'user', content: analysisPrompt }
     ];
 
