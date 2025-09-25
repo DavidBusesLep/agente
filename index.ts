@@ -1588,7 +1588,7 @@ app.post('/ai/answer', async (req, reply) => {
   const monthNameEs = new Intl.DateTimeFormat('es-ES', { month: 'long' }).format(nowForCtx);
   const ddEs = String(nowForCtx.getDate()).padStart(2, '0');
   const yyyyEs = nowForCtx.getFullYear();
-  const dateCtx = `Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. El año actual es ${yyyyEs}. Para cálculos de fechas usá la función \`get_date_info\` (alias: \`getDateInfo\`). Importante: la fecha ya está resuelta por el sistema. No le pidas al cliente que confirme nuevamente. Usá la fecha tal cual se te entrega en el contexto.`;
+  const dateCtx = `CONTEXTO DE FECHA: Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. Para cálculos de fechas usá la función get_date_info. Las fechas relativas ya están resueltas automáticamente.`;
   
   const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${systemPrompt}` : dateCtx;
 
@@ -1686,7 +1686,29 @@ app.post('/ai/answer', async (req, reply) => {
     // Continúa a siguiente ronda; el loop hará una nueva llamada con resultados agregados
   }
 
-  const finalAnswer = assistantMessage?.content ?? '';
+  // Sanitizar contenido del asistente: eliminar prefijos técnicos no deseados
+  function sanitizeAssistantContent(text: string): string {
+    if (!text) return text;
+    let cleaned = text;
+    
+    // Eliminar líneas iniciales con patrones técnicos comunes
+    const patterns = [
+      /^\s*:\s*\d{4}-\d{2}-\d{2}-\d{2}:\d{2}:\d{2}-\d{3}\s*\n+/,  // ": 2025-09-25-14:30:45-001"
+      /^\s*\d{4}-\d{2}-\d{2}-\d{2}:\d{2}:\d{2}-\d{3}\s*\n+/,       // "2025-09-25-14:30:45-001"
+      /^\s*:\s*\d+\s*\n+/,                                          // ": 1234567890"
+      /^\s*\d{10,}\s*\n+/,                                          // "1234567890"
+      /^\s*:\s*[A-Za-z0-9\-_]+\s*\n+/                              // ": abc-123_xyz"
+    ];
+    
+    for (const pattern of patterns) {
+      cleaned = cleaned.replace(pattern, '');
+    }
+    
+    return cleaned.trim();
+  }
+
+  let finalAnswer = assistantMessage?.content ?? '';
+  finalAnswer = sanitizeAssistantContent(finalAnswer);
 
   // 8-9. Usage logging and billing
   const tokensIn = estimateMessagesTokens(messages);
@@ -2113,7 +2135,7 @@ Por favor, responde en ${parsed.language === 'es' ? 'español' : parsed.language
     const monthNameEs = new Intl.DateTimeFormat('es-ES', { month: 'long' }).format(nowForCtx);
     const ddEs = String(nowForCtx.getDate()).padStart(2, '0');
     const yyyyEs = nowForCtx.getFullYear();
-    const dateCtx = `Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. El año actual es ${yyyyEs}. Para cálculos de fechas usá la función \`get_date_info\` (alias: \`getDateInfo\`). Importante: la fecha ya está resuelta por el sistema. No le pidas al cliente que confirme nuevamente. Usá la fecha tal cual se te entrega en el contexto.`;
+    const dateCtx = `CONTEXTO DE FECHA: Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. Para cálculos de fechas usá la función get_date_info. Las fechas relativas ya están resueltas automáticamente.`;
     
     const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${systemPrompt}` : dateCtx;
 
