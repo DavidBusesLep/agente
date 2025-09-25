@@ -45,7 +45,181 @@ export async function getAllOriginLocationsFromDb(): Promise<{ Localidades?: any
   }
 }
 
+// Utilidades para cálculo y formateo de fechas en español
+function capitalizeEs(value: string): string {
+  if (!value) return value;
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function formatDateEs(date: Date) {
+  const day = String(date.getDate()).padStart(2, '0');
+  const year = date.getFullYear();
+  const monthName = new Intl.DateTimeFormat('es-ES', { month: 'long' }).format(date);
+  const weekDay = new Intl.DateTimeFormat('es-ES', { weekday: 'long' }).format(date);
+  return {
+    iso: `${year}-${String(date.getMonth() + 1).padStart(2, '0')}-${day}`,
+    display: `${capitalizeEs(weekDay)} ${day} de ${capitalizeEs(monthName)} de ${year}`,
+    year,
+    month: date.getMonth() + 1,
+    day: Number(day),
+    weekday: capitalizeEs(weekDay)
+  };
+}
+
+function parseDayOfWeekEs(text: string): number | null {
+  const map: Record<string, number> = {
+    'lunes': 1, 'martes': 2, 'miercoles': 3, 'miércoles': 3, 'jueves': 4, 'viernes': 5, 'sabado': 6, 'sábado': 6, 'domingo': 0
+  };
+  const keys = Object.keys(map);
+  for (const k of keys) {
+    if (text.includes(k)) return map[k];
+  }
+  return null;
+}
+
+function getNextWeekday(from: Date, targetWeekday: number): Date {
+  const d = new Date(from);
+  const current = d.getDay();
+  let delta = (targetWeekday - current + 7) % 7;
+  if (delta === 0) delta = 7; // "próximo" implica futuro
+  d.setDate(d.getDate() + delta);
+  return d;
+}
+
+function safeParseDate(input: string, referenceYear: number): Date | null {
+  const t = input.trim();
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  if (iso.test(t)) {
+    const d = new Date(t);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const dmy = /^(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?$/;
+  const m = t.match(dmy);
+  if (m) {
+    const dd = Number(m[1]);
+    const mm = Number(m[2]);
+    let yy = m[3] ? Number(m[3]) : referenceYear;
+    if (yy < 100) yy += 2000;
+    const d = new Date(yy, mm - 1, dd);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+
+function diffInDays(a: Date, b: Date): number {
+  const ms = Math.abs(a.getTime() - b.getTime());
+  return Math.round(ms / (1000 * 60 * 60 * 24));
+}
+
+function diffInMonths(a: Date, b: Date): number {
+  const y = a.getFullYear() - b.getFullYear();
+  const m = a.getMonth() - b.getMonth();
+  const total = y * 12 + m;
+  return Math.abs(total);
+}
+
+async function executeGetDateInfo(args: { instruction: string; reference_date?: string }) {
+  const instructionRaw = String(args?.instruction || '').toLowerCase();
+  if (!instructionRaw) return { error: "'instruction' es requerido" };
+
+  const now = args?.reference_date ? (safeParseDate(String(args.reference_date), new Date().getFullYear()) || new Date()) : new Date();
+
+  // Intentar usar date-fns si está instalado (opcional)
+  let dfns: any = null;
+  try { dfns = await import('date-fns'); } catch {}
+
+  // Fecha actual
+  if (instructionRaw.includes('fecha actual') || instructionRaw === 'hoy' || instructionRaw.includes('hoy es')) {
+    const info = formatDateEs(now);
+    return { type: 'today', ...info };
+  }
+
+  // Próximo día de la semana
+  if (instructionRaw.includes('próximo') || instructionRaw.includes('proximo') || instructionRaw.includes('siguiente')) {
+    const dow = parseDayOfWeekEs(instructionRaw);
+    if (dow !== null) {
+      const next = dfns?.nextDay ? dfns.nextDay(now, dow) : getNextWeekday(now, dow);
+      const info = formatDateEs(next);
+      return { type: 'next_weekday', target_weekday: dow, ...info };
+    }
+    // Próximo mes / año
+    if (instructionRaw.includes('mes')) {
+      const d = new Date(now);
+      if (dfns?.addMonths) {
+        const next = dfns.addMonths(d, 1);
+        const info = formatDateEs(next);
+        return { type: 'next_month', ...info };
+      } else {
+        d.setMonth(d.getMonth() + 1);
+        const info = formatDateEs(d);
+        return { type: 'next_month', ...info };
+      }
+    }
+    if (instructionRaw.includes('año') || instructionRaw.includes('anio')) {
+      const d = new Date(now);
+      if (dfns?.addYears) {
+        const next = dfns.addYears(d, 1);
+        const info = formatDateEs(next);
+        return { type: 'next_year', ...info };
+      } else {
+        d.setFullYear(d.getFullYear() + 1);
+        const info = formatDateEs(d);
+        return { type: 'next_year', ...info };
+      }
+    }
+  }
+
+  // Año de una fecha concreta y/o próximo DD/MM
+  const dateLike = instructionRaw.match(/(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?)/);
+  if (dateLike) {
+    const target = safeParseDate(dateLike[1], now.getFullYear());
+    if (target) {
+      let d = target;
+      if (instructionRaw.includes('próximo') || instructionRaw.includes('proximo') || instructionRaw.includes('siguiente')) {
+        if (dfns?.isBefore ? dfns.isBefore(target, now) : target.getTime() <= now.getTime()) {
+          if (dfns?.addYears) d = dfns.addYears(target, 1); else d = new Date(target.getFullYear() + 1, target.getMonth(), target.getDate());
+        }
+      }
+      const info = formatDateEs(d);
+      return { type: 'date_of', input: dateLike[1], ...info };
+    }
+  }
+
+  // Diferencias en días/meses entre dos fechas
+  if (instructionRaw.includes('diferenc') || instructionRaw.includes('cuántos días') || instructionRaw.includes('cuantos dias')) {
+    const two = instructionRaw.match(/(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?).*?(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?)/);
+    if (two) {
+      const a = safeParseDate(two[1], now.getFullYear());
+      const b = safeParseDate(two[2], now.getFullYear());
+      if (a && b) {
+        const days = dfns?.differenceInCalendarDays ? Math.abs(dfns.differenceInCalendarDays(a, b)) : diffInDays(a, b);
+        const months = dfns?.differenceInCalendarMonths ? Math.abs(dfns.differenceInCalendarMonths(a, b)) : diffInMonths(a, b);
+        return { type: 'diff', from: formatDateEs(a), to: formatDateEs(b), diff: { days, months } };
+      }
+    }
+  }
+
+  // Fallback genérico
+  const info = formatDateEs(now);
+  return { type: 'fallback', note: 'No se pudo interpretar la instrucción. Devuelvo la fecha de referencia.', ...info };
+}
+
 export const localTools: LocalToolDef[] = [
+  {
+    name: 'get_date_info',
+    description: `Herramienta de fecha confiable. Interpreta instrucciones en español y devuelve resultados exactos.
+Usos típicos: "cuándo es el próximo miércoles", "próximo mes/año", "qué año es el próximo 25/12", "diferencia en días entre 01/09 y 25/09", "fecha actual".
+Siempre responde con fechas precisas basadas en el reloj del servidor.
+Campos de salida comunes: iso, display, year, month, day, weekday. Para difs: diff.days, diff.months.`,
+    parameters: { type: 'object', properties: { instruction: { type: 'string' }, reference_date: { type: 'string' } }, required: ['instruction'], additionalProperties: false },
+    execute: async (args) => await executeGetDateInfo(args)
+  },
+  {
+    name: 'getDateInfo',
+    description: `Alias de get_date_info. Usa este nombre si el modelo prefiere camelCase.`,
+    parameters: { type: 'object', properties: { instruction: { type: 'string' }, reference_date: { type: 'string' } }, required: ['instruction'], additionalProperties: false },
+    execute: async (args) => await executeGetDateInfo(args)
+  },
   {
     name: 'get_origin_locations',
     description: `Lista todas las localidades de origen disponibles.

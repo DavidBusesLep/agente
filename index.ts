@@ -1475,7 +1475,16 @@ app.post('/ai/answer', async (req, reply) => {
     return [{ role: m.role, content: m.content } as any];
   });
 
+  const capitalize = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+  const nowForCtx = new Date();
+  const dayNameEs = new Intl.DateTimeFormat('es-ES', { weekday: 'long' }).format(nowForCtx);
+  const monthNameEs = new Intl.DateTimeFormat('es-ES', { month: 'long' }).format(nowForCtx);
+  const ddEs = String(nowForCtx.getDate()).padStart(2, '0');
+  const yyyyEs = nowForCtx.getFullYear();
+  const dateCtx = `Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. El año actual es ${yyyyEs}. Para cálculos de fechas usá la función \`get_date_info\` (alias: \`getDateInfo\`).`;
+
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }> = [
+    { role: 'system', content: dateCtx },
     { role: 'system', content: systemPrompt },
     ...(parsed.context_tools && parsed.context_tools.length
       ? [{ role: 'system', content: `Contexto de herramientas previas: ${JSON.stringify(parsed.context_tools)}` } as any]
@@ -1990,7 +1999,16 @@ Pregunta del usuario: ${userQuestion}
 
 Por favor, responde en ${parsed.language === 'es' ? 'español' : parsed.language}.`;
 
+    const capitalize = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+    const nowForCtx = new Date();
+    const dayNameEs = new Intl.DateTimeFormat('es-ES', { weekday: 'long' }).format(nowForCtx);
+    const monthNameEs = new Intl.DateTimeFormat('es-ES', { month: 'long' }).format(nowForCtx);
+    const ddEs = String(nowForCtx.getDate()).padStart(2, '0');
+    const yyyyEs = nowForCtx.getFullYear();
+    const dateCtx = `Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. El año actual es ${yyyyEs}. Para cálculos de fechas usá la función \`get_date_info\` (alias: \`getDateInfo\`).`;
+
     const messages = [
+      { role: 'system', content: dateCtx },
       { role: 'system', content: systemPrompt },
       { role: 'user', content: analysisPrompt }
     ];
