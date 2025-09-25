@@ -1333,6 +1333,104 @@ const DocumentRequestSchema = z.object({
 
 // Tools importadas desde src/tools/localTools
 
+// --- Resolución de fechas relativas en mensajes del usuario ---
+function formatDateDMY(date: Date): string {
+  const d = String(date.getDate()).padStart(2, '0');
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const y = date.getFullYear();
+  return `${d}/${m}/${y}`;
+}
+
+function addDays(base: Date, days: number): Date {
+  const d = new Date(base);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function addMonths(base: Date, months: number): Date {
+  const d = new Date(base);
+  const targetMonth = d.getMonth() + months;
+  d.setMonth(targetMonth);
+  return d;
+}
+
+function addYears(base: Date, years: number): Date {
+  const d = new Date(base);
+  d.setFullYear(d.getFullYear() + years);
+  return d;
+}
+
+function parseWeekdayEs(word: string): number | null {
+  const w = word.toLowerCase();
+  const map: Record<string, number> = {
+    'domingo': 0,
+    'lunes': 1,
+    'martes': 2,
+    'miércoles': 3,
+    'miercoles': 3,
+    'jueves': 4,
+    'viernes': 5,
+    'sábado': 6,
+    'sabado': 6
+  };
+  return w in map ? map[w] : null;
+}
+
+function nextWeekday(from: Date, target: number): Date {
+  const d = new Date(from);
+  const current = d.getDay();
+  let delta = (target - current + 7) % 7;
+  if (delta === 0) delta = 7; // "próximo" → futuro
+  d.setDate(d.getDate() + delta);
+  return d;
+}
+
+function resolveRelativeDatesInText(text: string, now: Date): string {
+  let out = text;
+  // Pasado mañana
+  out = out.replace(/\bpasado\s+mañana\b/gi, (_m) => `el ${formatDateDMY(addDays(now, 2))}`);
+  // Mañana
+  out = out.replace(/\bmañana\b|\bmanana\b/gi, (_m) => `el ${formatDateDMY(addDays(now, 1))}`);
+  // Hoy
+  out = out.replace(/\bhoy\b/gi, (_m) => `el ${formatDateDMY(now)}`);
+  // La semana que viene
+  out = out.replace(/\b(la\s+)?semana\s+que\s+viene\b/gi, (_m) => `la semana de ${formatDateDMY(addDays(now, 7))}`);
+  // El mes que viene / próximo mes
+  out = out.replace(/\b((el\s+)?mes\s+que\s+viene|(próximo|proximo|siguiente)\s+mes)\b/gi, (_m) => `en ${formatDateDMY(addMonths(now, 1))}`);
+  // El año que viene / próximo año
+  out = out.replace(/\b((el\s+)?año\s+que\s+viene|(próximo|proximo|siguiente)\s+año|anio)\b/gi, (_m) => `en ${formatDateDMY(addYears(now, 1))}`);
+  // Próximo/siguiente <weekday>
+  out = out.replace(/\b(próximo|proximo|siguiente)\s+(lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b/gi, (_m, _pfx, wd) => {
+    const dayIdx = parseWeekdayEs(wd);
+    if (dayIdx === null) return _m;
+    const d = nextWeekday(now, dayIdx);
+    return `el ${formatDateDMY(d)}`;
+  });
+  // <weekday> que viene (el miércoles que viene)
+  out = out.replace(/\b(el\s+)?(lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\s+que\s+viene\b/gi, (_m, _art, wd) => {
+    const dayIdx = parseWeekdayEs(wd);
+    if (dayIdx === null) return _m;
+    const d = nextWeekday(now, dayIdx);
+    return `el ${formatDateDMY(d)}`;
+  });
+  return out;
+}
+
+function resolveRelativeDatesInContent(content: any, now: Date): any {
+  if (typeof content === 'string') {
+    return resolveRelativeDatesInText(content, now);
+  }
+  if (Array.isArray(content)) {
+    return content.map((item: any) => {
+      if (item?.type === 'text' && typeof item.text === 'string') {
+        return { ...item, text: resolveRelativeDatesInText(item.text, now) };
+      }
+      return item;
+    });
+  }
+  return content;
+}
+
 app.post('/ai/answer', async (req, reply) => {
   const parsed = AiAnswerRequestSchema.parse(req.body);
   const tenant = req.tenant!;
@@ -1342,7 +1440,7 @@ app.post('/ai/answer', async (req, reply) => {
   // Verificar si las tools están habilitadas para decidir si exponerlas o no
   const tenantToolsEnabled = await prisma.tenant.findUnique({ where: { id: tenant.id }, select: { toolsEnabled: true } });
   const toolsAllowed = !!tenantToolsEnabled?.toolsEnabled;
-  const systemPrompt = settings?.systemPrompt ?? 'Eres un asistente útil, tu nombre es mirlo';
+  const systemPrompt = settings?.systemPrompt ?? '';
   const temperature = settings?.temperature ?? 0.7;
   const maxTokens = settings?.maxTokens ?? 1000;
 
@@ -1458,8 +1556,17 @@ app.post('/ai/answer', async (req, reply) => {
     }
   }
 
-  // 5. Build messages (inyectar context_tools globales y por-mensaje, soportar contenido multimodal)
-  const convMessages: Array<{ role: 'user' | 'assistant'; content: any }> = parsed.conversation.flatMap((m: any) => {
+  // 5. Preprocesar fechas relativas en mensajes del usuario
+  const nowRef = new Date();
+  const conversationWithResolvedDates = parsed.conversation.map((m: any) => {
+    if (m.role === 'user') {
+      return { ...m, content: resolveRelativeDatesInContent(m.content, nowRef) };
+    }
+    return m;
+  });
+
+  // 6. Build messages (inyectar context_tools globales y por-mensaje, soportar contenido multimodal)
+  const convMessages: Array<{ role: 'user' | 'assistant'; content: any }> = conversationWithResolvedDates.flatMap((m: any) => {
     if (m.role === 'assistant' && Array.isArray(m.context_tools) && m.context_tools.length > 0) {
       const ctx = `Contexto de herramientas previas: ${JSON.stringify(m.context_tools)}`;
       // Si el contenido es multimodal, necesitamos manejarlo diferente
@@ -1481,7 +1588,7 @@ app.post('/ai/answer', async (req, reply) => {
   const monthNameEs = new Intl.DateTimeFormat('es-ES', { month: 'long' }).format(nowForCtx);
   const ddEs = String(nowForCtx.getDate()).padStart(2, '0');
   const yyyyEs = nowForCtx.getFullYear();
-  const dateCtx = `Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. El año actual es ${yyyyEs}. Para cálculos de fechas usá la función \`get_date_info\` (alias: \`getDateInfo\`).`;
+  const dateCtx = `Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. El año actual es ${yyyyEs}. Para cálculos de fechas usá la función \`get_date_info\` (alias: \`getDateInfo\`). Importante: la fecha ya está resuelta por el sistema. No le pidas al cliente que confirme nuevamente. Usá la fecha tal cual se te entrega en el contexto.`;
 
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }> = [
     { role: 'system', content: dateCtx },
@@ -2005,7 +2112,7 @@ Por favor, responde en ${parsed.language === 'es' ? 'español' : parsed.language
     const monthNameEs = new Intl.DateTimeFormat('es-ES', { month: 'long' }).format(nowForCtx);
     const ddEs = String(nowForCtx.getDate()).padStart(2, '0');
     const yyyyEs = nowForCtx.getFullYear();
-    const dateCtx = `Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. El año actual es ${yyyyEs}. Para cálculos de fechas usá la función \`get_date_info\` (alias: \`getDateInfo\`).`;
+    const dateCtx = `Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. El año actual es ${yyyyEs}. Para cálculos de fechas usá la función \`get_date_info\` (alias: \`getDateInfo\`). Importante: la fecha ya está resuelta por el sistema. No le pidas al cliente que confirme nuevamente. Usá la fecha tal cual se te entrega en el contexto.`;
 
     const messages = [
       { role: 'system', content: dateCtx },
