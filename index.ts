@@ -1385,34 +1385,46 @@ function nextWeekday(from: Date, target: number): Date {
   return d;
 }
 
-function resolveRelativeDatesInText(text: string, now: Date): string {
+function resolveRelativeDatesInText(text: string, _now: Date): string {
+  const tz = process.env.AGENT_TZ || 'America/Argentina/Buenos_Aires';
+  const fmt = new Intl.DateTimeFormat('es-ES', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const parts = fmt.formatToParts(new Date());
+  const y = Number(parts.find(p => p.type === 'year')?.value || new Date().getFullYear());
+  const m = Number(parts.find(p => p.type === 'month')?.value || (new Date().getMonth() + 1));
+  const d0 = Number(parts.find(p => p.type === 'day')?.value || new Date().getDate());
+  const nowTz = new Date(y, (m - 1), d0);
+
   let out = text;
-  // Pasado mañana
-  out = out.replace(/\bpasado\s+mañana\b/gi, (_m) => `el ${formatDateDMY(addDays(now, 2))}`);
-  // Mañana
-  out = out.replace(/\bmañana\b|\bmanana\b/gi, (_m) => `el ${formatDateDMY(addDays(now, 1))}`);
-  // Hoy
-  out = out.replace(/\bhoy\b/gi, (_m) => `el ${formatDateDMY(now)}`);
-  // La semana que viene
-  out = out.replace(/\b(la\s+)?semana\s+que\s+viene\b/gi, (_m) => `la semana de ${formatDateDMY(addDays(now, 7))}`);
-  // El mes que viene / próximo mes
-  out = out.replace(/\b((el\s+)?mes\s+que\s+viene|(próximo|proximo|siguiente)\s+mes)\b/gi, (_m) => `en ${formatDateDMY(addMonths(now, 1))}`);
-  // El año que viene / próximo año
-  out = out.replace(/\b((el\s+)?año\s+que\s+viene|(próximo|proximo|siguiente)\s+año|anio)\b/gi, (_m) => `en ${formatDateDMY(addYears(now, 1))}`);
-  // Próximo/siguiente <weekday>
-  out = out.replace(/\b(próximo|proximo|siguiente)\s+(lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b/gi, (_m, _pfx, wd) => {
-    const dayIdx = parseWeekdayEs(wd);
-    if (dayIdx === null) return _m;
-    const d = nextWeekday(now, dayIdx);
-    return `el ${formatDateDMY(d)}`;
-  });
-  // <weekday> que viene (el miércoles que viene)
-  out = out.replace(/\b(el\s+)?(lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\s+que\s+viene\b/gi, (_m, _art, wd) => {
-    const dayIdx = parseWeekdayEs(wd);
-    if (dayIdx === null) return _m;
-    const d = nextWeekday(now, dayIdx);
-    return `el ${formatDateDMY(d)}`;
-  });
+  const hasExplicitDate = /(\d{1,2}[\/\-]\d{1,2}(?:[\/\-]\d{2,4})?)/.test(out);
+
+  if (!hasExplicitDate) {
+    // Pasado mañana
+    out = out.replace(/\bpasado\s+mañana\b/gi, (_m) => `el ${formatDateDMY(addDays(nowTz, 2))}`);
+    // Mañana
+    out = out.replace(/\bmañana\b|\bmanana\b/gi, (_m) => `el ${formatDateDMY(addDays(nowTz, 1))}`);
+    // Hoy
+    out = out.replace(/\bhoy\b/gi, (_m) => `el ${formatDateDMY(nowTz)}`);
+    // La semana que viene
+    out = out.replace(/\b(la\s+)?semana\s+que\s+viene\b/gi, (_m) => `la semana de ${formatDateDMY(addDays(nowTz, 7))}`);
+    // El mes que viene / próximo mes
+    out = out.replace(/\b((el\s+)?mes\s+que\s+viene|(próximo|proximo|siguiente)\s+mes)\b/gi, (_m) => `en ${formatDateDMY(addMonths(nowTz, 1))}`);
+    // El año que viene / próximo año
+    out = out.replace(/\b((el\s+)?año\s+que\s+viene|(próximo|proximo|siguiente)\s+año|anio)\b/gi, (_m) => `en ${formatDateDMY(addYears(nowTz, 1))}`);
+    // Próximo/siguiente <weekday>
+    out = out.replace(/\b(próximo|proximo|siguiente)\s+(lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b/gi, (_m, _pfx, wd) => {
+      const dayIdx = parseWeekdayEs(wd);
+      if (dayIdx === null) return _m;
+      const d = nextWeekday(nowTz, dayIdx);
+      return `el ${formatDateDMY(d)}`;
+    });
+    // <weekday> que viene (el miércoles que viene)
+    out = out.replace(/\b(el\s+)?(lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\s+que\s+viene\b/gi, (_m, _art, wd) => {
+      const dayIdx = parseWeekdayEs(wd);
+      if (dayIdx === null) return _m;
+      const d = nextWeekday(nowTz, dayIdx);
+      return `el ${formatDateDMY(d)}`;
+    });
+  }
   return out;
 }
 
@@ -1579,11 +1591,12 @@ app.post('/ai/answer', async (req, reply) => {
   });
 
   const capitalize = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+  const tz = process.env.AGENT_TZ || 'America/Argentina/Buenos_Aires';
   const nowForCtx = new Date();
-  const dayNameEs = new Intl.DateTimeFormat('es-ES', { weekday: 'long' }).format(nowForCtx);
-  const monthNameEs = new Intl.DateTimeFormat('es-ES', { month: 'long' }).format(nowForCtx);
-  const ddEs = String(nowForCtx.getDate()).padStart(2, '0');
-  const yyyyEs = nowForCtx.getFullYear();
+  const dayNameEs = new Intl.DateTimeFormat('es-ES', { weekday: 'long', timeZone: tz }).format(nowForCtx);
+  const monthNameEs = new Intl.DateTimeFormat('es-ES', { month: 'long', timeZone: tz }).format(nowForCtx);
+  const ddEs = new Intl.DateTimeFormat('es-ES', { day: '2-digit', timeZone: tz }).format(nowForCtx);
+  const yyyyEs = new Intl.DateTimeFormat('es-ES', { year: 'numeric', timeZone: tz }).format(nowForCtx);
   const dateCtx = `CONTEXTO DE FECHA: Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. Para cálculos de fechas usá la función get_date_info. Las fechas relativas ya están resueltas automáticamente.`;
   
   const nonNarrationPolicy = `REGLA DE ESTILO: Responde en español. No anuncies acciones futuras ni digas \"voy a\", \"ahora\", \"déjame\". Si ya tenés los datos necesarios, ejecuta los pasos y devuelve directamente el resultado final o la siguiente pregunta mínima imprescindible. Evita narración de proceso o intenciones.`;
@@ -2141,11 +2154,12 @@ Pregunta del usuario: ${userQuestion}
 Por favor, responde en ${parsed.language === 'es' ? 'español' : parsed.language}.`;
 
     const capitalize = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+    const tzDoc = process.env.AGENT_TZ || 'America/Argentina/Buenos_Aires';
     const nowForCtx = new Date();
-    const dayNameEs = new Intl.DateTimeFormat('es-ES', { weekday: 'long' }).format(nowForCtx);
-    const monthNameEs = new Intl.DateTimeFormat('es-ES', { month: 'long' }).format(nowForCtx);
-    const ddEs = String(nowForCtx.getDate()).padStart(2, '0');
-    const yyyyEs = nowForCtx.getFullYear();
+    const dayNameEs = new Intl.DateTimeFormat('es-ES', { weekday: 'long', timeZone: tzDoc }).format(nowForCtx);
+    const monthNameEs = new Intl.DateTimeFormat('es-ES', { month: 'long', timeZone: tzDoc }).format(nowForCtx);
+    const ddEs = new Intl.DateTimeFormat('es-ES', { day: '2-digit', timeZone: tzDoc }).format(nowForCtx);
+    const yyyyEs = new Intl.DateTimeFormat('es-ES', { year: 'numeric', timeZone: tzDoc }).format(nowForCtx);
     const dateCtx = `CONTEXTO DE FECHA: Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. Para cálculos de fechas usá la función get_date_info. Las fechas relativas ya están resueltas automáticamente.`;
     
     const nonNarrationPolicyDoc = `REGLA DE ESTILO: Responde en español. No anuncies acciones futuras ni digas \"voy a\", \"ahora\", \"déjame\". Si ya tenés los datos necesarios, ejecuta los pasos y devuelve directamente el resultado final o la siguiente pregunta mínima imprescindible. Evita narración de proceso o intenciones.`;
