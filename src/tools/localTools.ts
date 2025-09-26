@@ -11,6 +11,17 @@ export type LocalToolDef = {
   execute: (args: any) => Promise<any>;
 };
 
+// Adaptadores para LangGraph / LangChain: definición de herramientas dinámicas
+export function getLangChainTools() {
+  // Estructura simple: cada tool incluye name, description, schema Zod-like y executor
+  return localTools.map(t => ({
+    name: t.name,
+    description: t.description,
+    schema: t.parameters,
+    invoke: async (input: any) => t.execute(input)
+  }));
+}
+
 // Helpers equivalentes a las utilidades de Python
 function normalizeText(value: unknown): string {
   try { return String(value).toLowerCase(); } catch { return ''; }
@@ -716,6 +727,7 @@ Returns:
         Dict con el resultado de la operación.`,
     parameters: { type: 'object', properties: { id_loc_origen: { type: 'integer' }, id_loc_destino: { type: 'integer' }, dni: { type: 'string' }, nombre_parada: { type: 'string' } }, required: ['id_loc_origen', 'id_loc_destino', 'dni', 'nombre_parada'], additionalProperties: false },
     execute: async (args) => {
+      const { sqlServer } = await import('../services/sqlServer');
       const res = await sqlServer.executeStoredProcedure('Sp_WSOpenAiAgregar_parada_en_camino', { PLocOrigen: args.id_loc_origen, PLocDestino: args.id_loc_destino, PDni: String(args.dni), PNombreParada: args.nombre_parada });
       return res.success ? (res.data?.[0] ?? { success: true }) : { error: res.error };
     }

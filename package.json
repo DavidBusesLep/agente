@@ -22,7 +22,10 @@
     "mssql": "^10.0.4",
     "openai": "^4.56.0",
     "tesseract.js": "^6.0.1",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "@langchain/langgraph": "latest",
+    "@langchain/core": "latest",
+    "date-fns": "^3.6.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",

@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 
 // SQL Server (para tools locales)
 import { getOpenAiToolDefs, executeLocalTool } from './src/tools/localTools';
+import { LangGraphOrchestrator } from './src/graph/agentGraph';
 
 // Librerías para procesamiento de documentos (importación dinámica con tipos any)
 let mammoth: any = null;
@@ -1623,79 +1624,20 @@ app.post('/ai/answer', async (req, reply) => {
     return;
   }
 
-  // 5. Loop de function calling: ejecutar tools solo si están habilitadas
-  const toolDefs = toolsAllowed ? getOpenAiToolDefs() : [];
-  let messages = [...baseMessages];
-  let assistantMessage: any = null;
-  const traceLog: any[] = [];
-  const contextToolsOut: Array<{ name: string; args: any; result: any }> = [];
-  for (let round = 0; round < 16; round++) {
-    const baseReq: any = {
-      model: model.name,
-      messages,
-      temperature: temperature,
-      max_tokens: maxTokens,
-      tools: toolDefs.length ? toolDefs : undefined
-    };
-    // Si es gpt-5, aplicar knobs de settings si existen
-    if (model.name.toLowerCase().startsWith('gpt-5')) {
-      const reasoningEffort = (settings as any)?.gpt5ReasoningEffort;
-      const verbosity = (settings as any)?.gpt5Verbosity;
-      if (reasoningEffort) {
-        baseReq.reasoning = { effort: reasoningEffort };
-      }
-      if (verbosity) {
-        baseReq.verbosity = verbosity;
-      }
-      // tool_choice compatible con Chat Completions
-      if (toolDefs.length) {
-        baseReq.tool_choice = 'auto';
-      }
-    }
-    const resp = await createChatCompletionAdaptive(baseReq);
-    assistantMessage = resp.choices[0]?.message;
-    if (assistantMessage) messages.push(assistantMessage as any);
-    if ((parsed as any).trace) {
-      const tc: any[] = assistantMessage?.tool_calls ?? [];
-      const rawContent = (assistantMessage?.content ?? '') as string;
-      const contentTrim = rawContent ? String(rawContent).trim() : '';
-      const fallback = tc && tc.length ? `Solicita ejecutar ${tc.map((t: any) => t?.function?.name).filter(Boolean).join(', ')}` : '';
-      const assistantText = contentTrim || fallback;
-      traceLog.push({
-        round: round + 1,
-        assistant_message: assistantText,
-        assistant_tool_only: !contentTrim && tc && tc.length > 0,
-        tool_calls: tc.map((t: any) => ({ name: t?.function?.name, arguments: t?.function?.arguments }))
-      });
-    }
-    const toolCalls: any[] = assistantMessage?.tool_calls ?? [];
-    if (!toolCalls || toolCalls.length === 0) {
-      break; // no más tools; responder
-    }
-    console.log(`[TOOLS] Round ${round + 1}: executing ${toolCalls.length} tool call(s)`);
-    for (const call of toolCalls) {
-      const toolName = call.function?.name as string;
-      let args: any = {};
-      try { args = call.function?.arguments ? JSON.parse(call.function.arguments) : {}; } catch { args = {}; }
-      try {
-        const argsStr = (() => { try { return JSON.stringify(args); } catch { return String(args); } })();
-        console.log(`[TOOL] Executing ${toolName} with args: ${argsStr}`);
-      } catch {}
-      const result = await executeLocalTool(toolName, args);
-      try {
-        const resStr = (() => { try { return typeof result === 'string' ? result : JSON.stringify(result); } catch { return String(result); } })();
-        console.log(`[TOOL] Result for ${toolName}: ${resStr}`);
-      } catch {}
-      try { contextToolsOut.push({ name: toolName, args, result }); } catch {}
-      const toolCallId = (call as any).id || (call as any).tool_call_id;
-      const toolContent = typeof result === 'string' ? result : JSON.stringify(result);
-      messages.push({ role: 'tool', tool_call_id: toolCallId, content: toolContent } as any);
-      if ((parsed as any).trace) {
-        traceLog.push({ round: round + 1, tool_result: { name: toolName, result } });
-      }
-    }
-    // Continúa a siguiente ronda; el loop hará una nueva llamada con resultados agregados
-  }
+  // 7. Orquestación con LangGraph (grafo simple de tools + LLM)
+  const orchestrator = new LangGraphOrchestrator(openai);
+  const run = await orchestrator.run({
+    messages: baseMessages as any,
+    model: model.name,
+    temperature,
+    maxTokens,
+    toolsEnabled: toolsAllowed,
+    trace: parsed.trace
+  });
+  const messages = run.messages as any[];
+  const assistantMessage = run.final as any;
+  const traceLog = run.trace || [];
+  const contextToolsOut = (run as any).context_tools || [];
 
   // Sanitizar contenido del asistente: eliminar prefijos técnicos no deseados
   function sanitizeAssistantContent(text: string): string {
