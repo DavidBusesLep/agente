@@ -1569,15 +1569,11 @@ app.post('/ai/answer', async (req, reply) => {
   const convMessages: Array<{ role: 'user' | 'assistant'; content: any }> = conversationWithResolvedDates.flatMap((m: any) => {
     if (m.role === 'assistant' && Array.isArray(m.context_tools) && m.context_tools.length > 0) {
       const ctx = `Contexto de herramientas previas: ${JSON.stringify(m.context_tools)}`;
-      // Si el contenido es multimodal, necesitamos manejarlo diferente
-      if (Array.isArray(m.content)) {
-        // Agregar el contexto como texto al inicio del array de contenido
-        const contextContent = [{ type: 'text', text: ctx }, ...m.content];
-        return [{ role: 'assistant', content: contextContent } as any];
-      } else {
-        // Contenido simple de texto
-      return [{ role: 'assistant', content: `${ctx}\n\n${m.content}` } as any];
-      }
+      // Agregar el contexto como un mensaje de sistema separado, no como parte del contenido del asistente
+      return [
+        { role: 'system', content: ctx } as any,
+        { role: 'assistant', content: m.content } as any
+      ];
     }
     return [{ role: m.role, content: m.content } as any];
   });
@@ -1590,7 +1586,8 @@ app.post('/ai/answer', async (req, reply) => {
   const yyyyEs = nowForCtx.getFullYear();
   const dateCtx = `CONTEXTO DE FECHA: Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. Para cálculos de fechas usá la función get_date_info. Las fechas relativas ya están resueltas automáticamente.`;
   
-  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${systemPrompt}` : dateCtx;
+  const nonNarrationPolicy = `REGLA DE ESTILO: Responde en español. No anuncies acciones futuras ni digas \"voy a\", \"ahora\", \"déjame\". Si ya tenés los datos necesarios, ejecuta los pasos y devuelve directamente el resultado final o la siguiente pregunta mínima imprescindible. Evita narración de proceso o intenciones.`;
+  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${nonNarrationPolicy}\n\n${systemPrompt}` : `${dateCtx}\n\n${nonNarrationPolicy}`;
 
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }> = [
     { role: 'system', content: enhancedSystemPrompt },
@@ -1704,6 +1701,20 @@ app.post('/ai/answer', async (req, reply) => {
       cleaned = cleaned.replace(pattern, '');
     }
     
+    // Remover frases de meta-narración comunes en español (inicio de línea o tras punto)
+    const metaPhrases = [
+      /(^|[\.\!\?]\s+)(voy a|ahora|déjame|dejame|permíteme|permitime|procedo a|procederé a)\b/gi,
+      /(^|\n)perfecto\.?\s+ya\s+tengo\b/gi,
+      /(^|\n)voy\s+a\s+/gi,
+      /(^|\n)ahora\s+/gi,
+      /(^|\n)déjame\s+/gi,
+      /(^|\n)dejame\s+/gi
+    ];
+    for (const p of metaPhrases) {
+      cleaned = cleaned.replace(p, (m, pfx) => (pfx || ''));
+    }
+    // Compactar espacios dobles generados tras limpieza
+    cleaned = cleaned.replace(/\s{2,}/g, ' ');
     return cleaned.trim();
   }
 
@@ -2137,7 +2148,8 @@ Por favor, responde en ${parsed.language === 'es' ? 'español' : parsed.language
     const yyyyEs = nowForCtx.getFullYear();
     const dateCtx = `CONTEXTO DE FECHA: Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. Para cálculos de fechas usá la función get_date_info. Las fechas relativas ya están resueltas automáticamente.`;
     
-    const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${systemPrompt}` : dateCtx;
+    const nonNarrationPolicyDoc = `REGLA DE ESTILO: Responde en español. No anuncies acciones futuras ni digas \"voy a\", \"ahora\", \"déjame\". Si ya tenés los datos necesarios, ejecuta los pasos y devuelve directamente el resultado final o la siguiente pregunta mínima imprescindible. Evita narración de proceso o intenciones.`;
+    const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${nonNarrationPolicyDoc}\n\n${systemPrompt}` : `${dateCtx}\n\n${nonNarrationPolicyDoc}`;
 
     const messages = [
       { role: 'system', content: enhancedSystemPrompt },
