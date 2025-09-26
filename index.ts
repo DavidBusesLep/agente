@@ -1600,7 +1600,8 @@ app.post('/ai/answer', async (req, reply) => {
   const dateCtx = `CONTEXTO DE FECHA: Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. Para cálculos de fechas usá la función get_date_info. Las fechas relativas ya están resueltas automáticamente.`;
   
   const nonNarrationPolicy = `REGLA DE ESTILO: Responde en español. No anuncies acciones futuras ni digas \"voy a\", \"ahora\", \"déjame\". Si ya tenés los datos necesarios, ejecuta los pasos y devuelve directamente el resultado final o la siguiente pregunta mínima imprescindible. Evita narración de proceso o intenciones.`;
-  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${nonNarrationPolicy}\n\n${systemPrompt}` : `${dateCtx}\n\n${nonNarrationPolicy}`;
+  const noMarkdownLinksPolicy = `ENLACES: No uses formato Markdown para enlaces. Pega siempre las URLs completas en texto plano (ej.: https://... ).`;
+  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n\n${systemPrompt}` : `${dateCtx}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}`;
 
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }> = [
     { role: 'system', content: enhancedSystemPrompt },
@@ -1726,6 +1727,15 @@ app.post('/ai/answer', async (req, reply) => {
     for (const p of metaPhrases) {
       cleaned = cleaned.replace(p, (m, pfx) => (pfx || ''));
     }
+    // Convertir enlaces Markdown [texto](URL) a URL plano
+    cleaned = cleaned.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$2');
+    // Normalizar líneas con etiquetas y URL: conservar solo la URL en su propia línea
+    // Casos: "Link de pago: https://...", "Boleto: https://...", "🎟️ Boleto: https://..."
+    cleaned = cleaned.replace(/(^|\n)[^\n]*?\b(Link de pago|Boleto|boleto|link de pago)[^\n]*?(https?:\/\/[^\s)]+)(?=\s|$)/gi, (_m, pfx, _label, url) => `${pfx}${url}`);
+    // Asegurar que las URLs queden en su línea (insertar salto si quedan pegadas a texto previo)
+    cleaned = cleaned.replace(/([^\n\s])(https?:\/\/[^\s)]+)\/??/g, '$1\n$2');
+    // Compactar líneas múltiples en blanco
+    cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
     // Compactar espacios dobles generados tras limpieza
     cleaned = cleaned.replace(/\s{2,}/g, ' ');
     return cleaned.trim();
@@ -2163,7 +2173,8 @@ Por favor, responde en ${parsed.language === 'es' ? 'español' : parsed.language
     const dateCtx = `CONTEXTO DE FECHA: Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. Para cálculos de fechas usá la función get_date_info. Las fechas relativas ya están resueltas automáticamente.`;
     
     const nonNarrationPolicyDoc = `REGLA DE ESTILO: Responde en español. No anuncies acciones futuras ni digas \"voy a\", \"ahora\", \"déjame\". Si ya tenés los datos necesarios, ejecuta los pasos y devuelve directamente el resultado final o la siguiente pregunta mínima imprescindible. Evita narración de proceso o intenciones.`;
-    const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${nonNarrationPolicyDoc}\n\n${systemPrompt}` : `${dateCtx}\n\n${nonNarrationPolicyDoc}`;
+    const noMarkdownLinksPolicyDoc = `ENLACES: No uses formato Markdown para enlaces. Pega siempre las URLs completas en texto plano (ej.: https://... ).`;
+    const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${nonNarrationPolicyDoc}\n${noMarkdownLinksPolicyDoc}\n\n${systemPrompt}` : `${dateCtx}\n\n${nonNarrationPolicyDoc}\n${noMarkdownLinksPolicyDoc}`;
 
     const messages = [
       { role: 'system', content: enhancedSystemPrompt },
