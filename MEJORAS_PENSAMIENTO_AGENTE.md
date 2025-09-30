@@ -139,9 +139,11 @@ Sistema que detecta cuando el agente está "perdido" en un loop.
 #### **1. Tracking de Tool Calls Consecutivas:**
 ```typescript
 let consecutiveToolCalls = 0;
+const maxConsecutiveTools = 15; // Ajustado para operaciones complejas
 ```
 
-- **Si ≥5 herramientas consecutivas** → ALERTA y DETENCIÓN forzada
+- **Si ≥15 herramientas consecutivas** → ALERTA y DETENCIÓN forzada
+- Límite aumentado de 5 a 15 para permitir flujos complejos (ej: 4+ pasajeros con ida y vuelta)
 - Mensaje al modelo:
   ```
   ⚠️ Has ejecutado 5 herramientas consecutivas sin responder al usuario.
@@ -188,10 +190,11 @@ let consecutiveEmptyResults = 0;
 
 ```env
 # Límite de rounds para prevenir loops extremos
-AGENT_MAX_ROUNDS=10
+AGENT_MAX_ROUNDS=16
 
 # Límite de tool calls consecutivas antes de forzar respuesta
-AGENT_MAX_CONSECUTIVE_TOOLS=5
+# Valor actual: 15 (permite operaciones complejas: 4+ pasajeros con ida y vuelta)
+AGENT_MAX_CONSECUTIVE_TOOLS=15
 
 # Límite de fallos consecutivos antes de pedir ayuda
 AGENT_MAX_CONSECUTIVE_FAILURES=3

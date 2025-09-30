@@ -113,7 +113,10 @@ export class LangGraphOrchestrator {
       consecutiveToolCalls++;
       
       // Detección de loop improductivo: demasiadas tool calls sin responder al usuario
-      if (consecutiveToolCalls >= 5) {
+      // Límite aumentado a 15 para permitir operaciones complejas (ej: 4+ pasajeros con ida y vuelta)
+      const maxConsecutiveTools = 15;
+      
+      if (consecutiveToolCalls >= maxConsecutiveTools) {
         state.messages.push({
           role: 'system' as any,
           content: `⚠️ ALERTA: Has ejecutado ${consecutiveToolCalls} herramientas consecutivas sin responder al usuario. 
