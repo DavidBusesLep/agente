@@ -1606,6 +1606,7 @@ app.post('/ai/answer', async (req, reply) => {
   
   const nonNarrationPolicy = `REGLA DE ESTILO: Responde en español. No anuncies acciones futuras ni digas \"voy a\", \"ahora\", \"déjame\". Si ya tenés los datos necesarios, ejecuta los pasos y devuelve directamente el resultado final o la siguiente pregunta mínima imprescindible. Evita narración de proceso o intenciones.`;
   const noMarkdownLinksPolicy = `ENLACES: No uses formato Markdown para enlaces. Pega siempre las URLs completas en texto plano (ej.: https://... ).`;
+  const dataIntegrityPolicy = `DATOS DINÁMICOS (OBLIGATORIO): Nunca inventes horarios, precios, asientos, ni disponibilidad. Cuando el usuario pida horarios, “pasame de nuevo”, reservar, o el RESUMEN HISTÓRICO mencione horarios/tarifas/fechas, DEBES consultar herramientas (get_schedules, get_available_seats, get_prices) con los parámetros actuales (ruta y fecha) o preguntar los que falten. Si los datos podrían haber cambiado respecto a lo conversado antes, revalídalos con tools antes de responder.`;
   
   const thinkingPolicy = `ESTRATEGIA DE PENSAMIENTO (OBLIGATORIO):
 Antes de ejecutar herramientas, analiza mentalmente:
@@ -1645,13 +1646,23 @@ FLUJOS COMPLETOS:
 👤 Cliente nuevo: search_customer_data (vacío) → add_customer → continuar flujo
 📅 Fechas: get_date_info para calcular fechas relativas antes de buscar horarios`;
 
-  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n\n${systemPrompt}` : `${dateCtx}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}`;
+  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n${dataIntegrityPolicy}\n\n${systemPrompt}` : `${dateCtx}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n${dataIntegrityPolicy}`;
 
   const wantSummary = (parsed as any).return_summary !== false;
   const incomingSummariesRaw = (parsed as any).conversation_summary_in as (string | string[] | undefined);
   const incomingSummaries: string[] = Array.isArray(incomingSummariesRaw)
     ? incomingSummariesRaw.filter(s => typeof s === 'string' && s.trim())
     : (incomingSummariesRaw ? [incomingSummariesRaw] : []);
+
+  // Heurística simple: detectar intención de horarios/reserva para reforzar uso de tools
+  const lastUserMsg: any = [...conversationWithResolvedDates].reverse().find((m: any) => m.role === 'user');
+  const lastUserText = typeof lastUserMsg?.content === 'string'
+    ? lastUserMsg.content
+    : (Array.isArray(lastUserMsg?.content)
+        ? lastUserMsg.content.map((it: any) => (it?.type === 'text' ? it.text : '')).join(' ')
+        : '');
+  const needsSchedules = /\b(horario|horarios|reserv(ar|a)|pasame\s+de\s+nuevo|pasá\s+de\s+nuevo|pasa\s*me\s+de\s+nuevo|lista\s+de\s+horarios|volver\s+a\s+pasar)\b/i.test(lastUserText)
+    || (incomingSummaries.length && /\b(horario|horarios|tarifa|tarifas|ida\s+y\s+vuelta)\b/i.test(incomingSummaries.join(' ')) && /\b(pasame\s+de\s+nuevo|pas\w+ de nuevo|reserv(ar|a))\b/i.test(lastUserText));
 
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }> = [
     { role: 'system', content: enhancedSystemPrompt },
@@ -1660,6 +1671,9 @@ FLUJOS COMPLETOS:
       : []),
     ...(incomingSummaries.length
       ? incomingSummaries.map((s, i) => ({ role: 'system', content: `RESUMEN HISTÓRICO ${i + 1} (para contexto):\n${s}\n\nUsa este resumen para mantener continuidad y ser proactivo, sin repetirlo en las respuestas.` } as any))
+      : []),
+    ...(needsSchedules
+      ? [{ role: 'system', content: 'INTENCIÓN DETECTADA: El usuario solicita horarios o avanzar con la reserva. Debes consultar herramientas (get_schedules, y si aplica get_available_seats/get_prices) usando la fecha y ruta del contexto/resumen o preguntando lo mínimo necesario. No inventes horarios ni precios.' } as any]
       : []),
     ...convMessages
   ];
