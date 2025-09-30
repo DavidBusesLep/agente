@@ -1602,7 +1602,46 @@ app.post('/ai/answer', async (req, reply) => {
   
   const nonNarrationPolicy = `REGLA DE ESTILO: Responde en español. No anuncies acciones futuras ni digas \"voy a\", \"ahora\", \"déjame\". Si ya tenés los datos necesarios, ejecuta los pasos y devuelve directamente el resultado final o la siguiente pregunta mínima imprescindible. Evita narración de proceso o intenciones.`;
   const noMarkdownLinksPolicy = `ENLACES: No uses formato Markdown para enlaces. Pega siempre las URLs completas en texto plano (ej.: https://... ).`;
-  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n\n${systemPrompt}` : `${dateCtx}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}`;
+  
+  const thinkingPolicy = `ESTRATEGIA DE PENSAMIENTO (OBLIGATORIO):
+Antes de ejecutar herramientas, analiza mentalmente:
+
+1. CONTEXTO: ¿Qué información ya tengo? ¿Qué me falta?
+2. OBJETIVO: ¿Qué necesita exactamente el cliente?
+3. PLAN: ¿Qué herramientas debo usar y en qué orden?
+4. VALIDACIÓN: ¿Tengo todos los parámetros necesarios o debo preguntar primero?
+
+REGLAS DE DECISIÓN:
+- Si falta información crítica (ej: DNI, fecha, origen/destino) → PREGUNTAR primero
+- Si ya tengo los datos → EJECUTAR herramientas en secuencia lógica
+- Si una herramienta falla → ANALIZAR error y tomar acción alternativa
+- Después de ejecutar → VERIFICAR que el resultado es completo antes de responder
+
+EJEMPLOS DE BUENAS DECISIONES:
+
+Ejemplo 1 - Cliente pide pasaje pero NO da DNI:
+❌ MAL: Ejecutar search_customer_data sin DNI → fallará
+✅ BIEN: "Para buscarte en el sistema, ¿me das tu DNI?"
+
+Ejemplo 2 - Cliente da DNI "12345678":
+✅ BIEN: Ejecutar search_customer_data con {"nro_doc": "12345678"}
+  → Si devuelve datos: continuar con horarios
+  → Si devuelve vacío: "No estás registrado, necesito tu nombre, apellido y fecha de nacimiento"
+
+Ejemplo 3 - Cliente dice "quiero viajar mañana":
+✅ BIEN: Primero get_date_info con "mañana" → obtener fecha exacta → get_schedules con esa fecha
+❌ MAL: Intentar get_schedules directamente con "mañana"
+
+Ejemplo 4 - search_customer_data devuelve error:
+✅ BIEN: "Hubo un problema al buscar tus datos. ¿Me confirmas tu DNI?"
+❌ MAL: Seguir con add_to_cart sin datos de cliente
+
+FLUJOS COMPLETOS:
+🎫 Compra de pasaje: search_customer_data → get_schedules → get_available_seats → add_to_cart → process_payment
+👤 Cliente nuevo: search_customer_data (vacío) → add_customer → continuar flujo
+📅 Fechas: get_date_info para calcular fechas relativas antes de buscar horarios`;
+
+  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n\n${systemPrompt}` : `${dateCtx}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}`;
 
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }> = [
     { role: 'system', content: enhancedSystemPrompt },
@@ -1730,6 +1769,7 @@ app.post('/ai/answer', async (req, reply) => {
     auto_selected: !parsed.model && hasImages ? true : undefined,
     has_images: hasImages,
     has_documents: hasDocuments,
+    trace: parsed.trace ? traceLog : undefined,
     processed_content: {
       images: hasImages,
       documents: hasDocuments
