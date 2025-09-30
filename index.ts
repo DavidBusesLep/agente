@@ -1295,7 +1295,11 @@ const AiAnswerRequestSchema = z.object({
     name: z.string(),
     args: z.unknown().optional(),
     result: z.unknown().optional()
-  })).optional().default([])
+  })).optional().default([]),
+  // Resumen/es previos (persistidos por el integrador) para inyectar como contexto
+  conversation_summary_in: z.union([z.string(), z.array(z.string())]).optional(),
+  // Controlar si el endpoint debe devolver un resumen actualizado (por defecto, sí)
+  return_summary: z.boolean().optional().default(true)
 });
 
 // Schema para el endpoint de transcripción
@@ -1643,10 +1647,19 @@ FLUJOS COMPLETOS:
 
   const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n\n${systemPrompt}` : `${dateCtx}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}`;
 
+  const wantSummary = (parsed as any).return_summary !== false;
+  const incomingSummariesRaw = (parsed as any).conversation_summary_in as (string | string[] | undefined);
+  const incomingSummaries: string[] = Array.isArray(incomingSummariesRaw)
+    ? incomingSummariesRaw.filter(s => typeof s === 'string' && s.trim())
+    : (incomingSummariesRaw ? [incomingSummariesRaw] : []);
+
   const baseMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: any }> = [
     { role: 'system', content: enhancedSystemPrompt },
     ...(parsed.context_tools && parsed.context_tools.length
       ? [{ role: 'system', content: `Contexto de herramientas previas: ${JSON.stringify(parsed.context_tools)}` } as any]
+      : []),
+    ...(incomingSummaries.length
+      ? incomingSummaries.map((s, i) => ({ role: 'system', content: `RESUMEN HISTÓRICO ${i + 1} (para contexto):\n${s}\n\nUsa este resumen para mantener continuidad y ser proactivo, sin repetirlo en las respuestas.` } as any))
       : []),
     ...convMessages
   ];
@@ -1654,9 +1667,27 @@ FLUJOS COMPLETOS:
   // Pre-cost estimation to enforce 402 before calling the model
   const estInTokens = estimateMessagesTokens(baseMessages);
   const estOutTokens = maxTokens;
+
+  // Presupuesto para resumen (si se solicita). Usamos un modelo económico por defecto
+  let summarizerModel: any | null = null;
+  let estSummaryInTokens = 0;
+  let estSummaryOutTokens = 0;
+  let estSummaryCost = 0;
+  if (wantSummary) {
+    const summarizerModelName = 'openai/gpt-4o-mini';
+    summarizerModel = await ensureModelRecord(summarizerModelName);
+    // Estimación conservadora: usar los mismos tokens de entrada que baseMessages, cap a 4000, y salida 400
+    estSummaryInTokens = Math.min(estimateMessagesTokens(baseMessages), 4000);
+    estSummaryOutTokens = 800;
+    estSummaryCost =
+      (estSummaryInTokens * Number(summarizerModel.inputCostPerMillion)) / 1_000_000 +
+      (estSummaryOutTokens * Number(summarizerModel.outputCostPerMillion)) / 1_000_000;
+  }
+
   const estimatedCost =
     (estInTokens * Number(model.inputCostPerMillion)) / 1_000_000 +
-    (estOutTokens * Number(model.outputCostPerMillion)) / 1_000_000;
+    (estOutTokens * Number(model.outputCostPerMillion)) / 1_000_000 +
+    estSummaryCost;
 
   if (new Prisma.Decimal(estimatedCost).gt(tenant.balance)) {
     reply.code(402).send({ error: 'Saldo insuficiente para procesar la solicitud' });
@@ -1725,33 +1756,109 @@ FLUJOS COMPLETOS:
   let finalAnswer = assistantMessage?.content ?? '';
   finalAnswer = sanitizeAssistantContent(finalAnswer);
 
-  // 8-9. Usage logging and billing
+  // Generación de resumen de la conversación (opcional)
+  let conversationSummary: string | undefined = undefined;
+  if (wantSummary && summarizerModel) {
+    // Helper local para aplanar contenido multimodal a texto
+    const flattenContentToText = (content: any): string => {
+      if (!content) return '';
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        return content.map((item: any) => {
+          if (item?.type === 'text' && typeof item.text === 'string') return item.text;
+          if (item?.type === 'image_url') return '[imagen]';
+          if (item?.type === 'document_url') return '[documento]';
+          return '';
+        }).join('\n');
+      }
+      return '';
+    };
+
+    const convoText = conversationWithResolvedDates
+      .map((m: any) => `[${m.role}] ${flattenContentToText(m.content)}`)
+      .concat([`[assistant] ${finalAnswer}`])
+      .join('\n');
+
+    const priorSummariesText = incomingSummaries.length
+      ? `Resúmenes históricos previos (del más antiguo al más reciente):\n\n${incomingSummaries.map((s, i) => `${i + 1}) ${s}`).join('\n')}`
+      : '';
+
+    const summarizerMessages = [
+      { role: 'system', content: 'Eres un asistente que genera un resumen natural de una conversación cliente-agente. Usa 6-12 frases en español (puedes dividir en 1-2 párrafos cortos si ayuda), tono humano, sin listas ni numeraciones, sin saludos, sin repetir preguntas textuales. Incluye objetivos del cliente, decisiones tomadas, datos relevantes (fechas, nombres, preferencias) y próximos pasos si aplican. No incluyas contraseñas ni datos sensibles. Si se proveen resúmenes históricos, genera un resumen unificado actualizado que los subsuma junto con el último intercambio.' },
+      ...(priorSummariesText ? [{ role: 'user', content: priorSummariesText } as any] : []),
+      { role: 'user', content: `Conversación completa (roles incluidos, último intercambio incluido):\n\n${convoText}` }
+    ];
+
+    try {
+      const sumResp = await openai.chat.completions.create({
+        model: summarizerModel.name,
+        messages: summarizerMessages as any,
+        temperature: 0.3,
+        max_tokens: 800
+      } as any);
+      conversationSummary = String(sumResp.choices?.[0]?.message?.content || '').trim();
+    } catch (e) {
+      console.warn('⚠️  Fallo al generar resumen de conversación:', (e as any)?.message);
+      conversationSummary = undefined;
+    }
+  }
+
+  // 8-9. Usage logging and billing (incluye resumen si aplica)
   const tokensIn = estimateMessagesTokens(messages);
   const tokensOut = estimateTokensFromText(finalAnswer);
-  const costUsd =
+  const costMain =
     (tokensIn * Number(model.inputCostPerMillion)) / 1_000_000 +
     (tokensOut * Number(model.outputCostPerMillion)) / 1_000_000;
+
+  let sumTokensIn = 0;
+  let sumTokensOut = 0;
+  let costSummary = 0;
+  if (wantSummary && summarizerModel && conversationSummary) {
+    // Recalcular tokens reales del resumen
+    // Empatamos con el esquema de mensajes usado para el summarizer
+    const summaryInText = `Conversación completa (roles incluidos):\n\n`;
+    sumTokensIn = estimateTokensFromText(summaryInText) + estimateTokensFromText(finalAnswer) + estimateMessagesTokens(baseMessages); // aproximación conservadora
+    sumTokensOut = estimateTokensFromText(conversationSummary);
+    costSummary =
+      (sumTokensIn * Number(summarizerModel.inputCostPerMillion)) / 1_000_000 +
+      (sumTokensOut * Number(summarizerModel.outputCostPerMillion)) / 1_000_000;
+  }
+
+  const totalCost = costMain + costSummary;
 
   try {
     await prisma.$transaction(async tx => {
       // Re-check and deduct
       const freshTenant = await tx.tenant.findUnique({ where: { id: tenant.id }, select: { id: true, balance: true } });
       if (!freshTenant) throw new Error('Tenant not found');
-      if (freshTenant.balance.lt(costUsd)) {
+      if (freshTenant.balance.lt(totalCost)) {
         throw Object.assign(new Error('Saldo insuficiente'), { httpStatus: 402 });
       }
+      // Registro principal
       await tx.usageLog.create({
         data: {
           tenantId: tenant.id,
           modelId: model.id,
           tokensIn: tokensIn,
           tokensOut: tokensOut,
-          costUsd: new Prisma.Decimal(costUsd)
+          costUsd: new Prisma.Decimal(costMain)
         }
       });
+      // Registro de resumen (si aplica)
+      if (wantSummary && summarizerModel && (sumTokensIn > 0 || sumTokensOut > 0)) {
+        await tx.usageLog.create({
+          data: {
+            tenantId: tenant.id,
+            modelId: summarizerModel.id,
+            tokensIn: sumTokensIn,
+            tokensOut: sumTokensOut,
+            costUsd: new Prisma.Decimal(costSummary)
+          }
+        });
+      }
       await tx.tenant.update({
         where: { id: tenant.id },
-        data: { balance: freshTenant.balance.minus(costUsd) }
+        data: { balance: freshTenant.balance.minus(totalCost) }
       });
     });
   } catch (err: any) {
@@ -1769,6 +1876,7 @@ FLUJOS COMPLETOS:
     auto_selected: !parsed.model && hasImages ? true : undefined,
     has_images: hasImages,
     has_documents: hasDocuments,
+    conversation_summary: wantSummary ? conversationSummary : undefined,
     trace: parsed.trace ? traceLog : undefined,
     processed_content: {
       images: hasImages,
