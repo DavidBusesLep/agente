@@ -1762,8 +1762,8 @@ FLUJOS COMPLETOS:
     cleaned = cleaned.replace(/([^\n\s])(https?:\/\/[^\s)]+)\/??/g, '$1\n$2');
     // Compactar líneas múltiples en blanco
     cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-    // Compactar espacios dobles generados tras limpieza
-    cleaned = cleaned.replace(/\s{2,}/g, ' ');
+    // Compactar espacios dobles generados tras limpieza (preservando saltos de línea)
+    cleaned = cleaned.replace(/[ \t]{2,}/g, ' ');
     return cleaned.trim();
   }
 
