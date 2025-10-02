@@ -425,24 +425,27 @@ Returns:
     - Si el usuario pregunta por un horario que no existe, solo ofrece los horarios REALES más cercanos de la lista
     - Al sugerir alternativas, COPIA EXACTAMENTE el horario de salida y llegada que aparece en los datos devueltos
     
-   IMPORTANTE: Siempre que muestres los horarios al usuario, debes usar formato de código monoespaciado para que WhatsApp respete los espacios.
+   IMPORTANTE: Siempre que muestres los horarios al usuario, debes usar EXACTAMENTE el siguiente formato:
     
-    Formato a usar:
+    Formato EXACTO a usar:
+    
     Origen a Destino DD-MM-YYYY
-    [AQUÍ INICIA BLOQUE DE CÓDIGO CON 3 ACENTOS GRAVES]
-    Salida  Llegada
-    05:14   08:54
-    06:00   09:00
-    06:01   09:41
-    08:00   11:00
-    [AQUÍ TERMINA BLOQUE DE CÓDIGO CON 3 ACENTOS GRAVES]
-    Tarifa Ida: $[MONTO MINIMO] - $[MONTO MAXIMO]
-    Promoción Ida y Vuelta: $[MONTO_IDA_VUELTA]
     
-    - DEBES usar 3 acentos graves (backticks) al inicio y al final para crear un bloque de código
-    - Dentro del bloque de código, alinea las columnas con espacios
-    - NO uses asteriscos (*) dentro del bloque de código
-    - NO incluyas detalles de servicio (Semicama, Directo, etc) en la tabla 
+    🕐 *Salida:* 05:14 → *Llegada:* 08:54
+    🕐 *Salida:* 06:00 → *Llegada:* 09:00
+    🕐 *Salida:* 06:01 → *Llegada:* 09:41
+    🕐 *Salida:* 08:00 → *Llegada:* 11:00
+    
+    💰 *Tarifa Ida:* $[MONTO_MINIMO] - $[MONTO_MAXIMO]
+    💰 *Promoción Ida y Vuelta:* $[MONTO_IDA_VUELTA]
+    
+    REGLAS CRÍTICAS DE FORMATO:
+    - Cada horario en una línea separada comenzando con el emoji 🕐
+    - Formato de cada línea: 🕐 *Salida:* HH:MM → *Llegada:* HH:MM
+    - Usa la flecha → (no guiones) para separar salida de llegada
+    - Las tarifas comienzan con el emoji 💰
+    - NO incluyas detalles de servicio (Semicama, Directo, etc)
+    - Mantén este formato simple y limpio para todos los horarios
 
     Ejecuta: Sp_WSOpenAiListarHorariosV2
     

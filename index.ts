@@ -1013,7 +1013,7 @@ app.post('/auth/signup', async (req, reply) => {
       data: {
         tenantId: tenant.id,
         systemPrompt: 'Eres un asistente útil, tu nombre es mirlo',
-        temperature: 0.7,
+        temperature: 0.3,
         maxTokens: 1000,
         modelDefault: 'openai/gpt-4o-mini',
         aiEndpointUrl: 'http://181.117.6.16:3000/ai/answer',
@@ -1090,7 +1090,7 @@ app.post('/api/settings', { preHandler: authGuard }, async (req: any, reply) => 
   const body = bodySchema.parse(req.body);
   const defaults = {
     systemPrompt: 'Eres un asistente útil, tu nombre es mirlo',
-    temperature: 0.7,
+    temperature: 0.3,
     maxTokens: 1000,
     modelDefault: 'openai/gpt-4o-mini',
     aiEndpointUrl: 'http://181.117.6.16:3000/ai/answer',
@@ -1458,7 +1458,7 @@ app.post('/ai/answer', async (req, reply) => {
   const tenantToolsEnabled = await prisma.tenant.findUnique({ where: { id: tenant.id }, select: { toolsEnabled: true } });
   const toolsAllowed = !!tenantToolsEnabled?.toolsEnabled;
   const systemPrompt = settings?.systemPrompt ?? '';
-  const temperature = settings?.temperature ?? 0.7;
+  const temperature = settings?.temperature ?? 0.3;
   const maxTokens = settings?.maxTokens ?? 1000;
 
   // 1-2. Detectar si la conversación contiene imágenes o documentos
@@ -1609,18 +1609,26 @@ app.post('/ai/answer', async (req, reply) => {
   const dataIntegrityPolicy = `DATOS DINÁMICOS (OBLIGATORIO): Nunca inventes horarios, precios, asientos, ni disponibilidad. Cuando el usuario pida horarios, “pasame de nuevo”, reservar, o el RESUMEN HISTÓRICO mencione horarios/tarifas/fechas, DEBES consultar herramientas (get_schedules, get_available_seats, get_prices) con los parámetros actuales (ruta y fecha) o preguntar los que falten. Si los datos podrían haber cambiado respecto a lo conversado antes, revalídalos con tools antes de responder.`;
   
   const thinkingPolicy = `ESTRATEGIA DE PENSAMIENTO (OBLIGATORIO):
-Antes de ejecutar herramientas, analiza mentalmente:
+Antes de responder o ejecutar herramientas, DEBES hacer un análisis profundo siguiendo estos pasos:
 
-1. CONTEXTO: ¿Qué información ya tengo? ¿Qué me falta?
-2. OBJETIVO: ¿Qué necesita exactamente el cliente?
-3. PLAN: ¿Qué herramientas debo usar y en qué orden?
-4. VALIDACIÓN: ¿Tengo todos los parámetros necesarios o debo preguntar primero?
+🧠 FASE 1 - ANÁLISIS DE CONTEXTO (analiza internamente antes de actuar):
+1. CONTEXTO: ¿Qué información ya tengo de conversaciones anteriores? ¿Qué me falta?
+2. OBJETIVO: ¿Qué necesita exactamente el cliente? ¿Es claro o debo clarificar?
+3. DATOS DISPONIBLES: Revisa toda la conversación - ¿Ya se mencionaron horarios, fechas, DNI, rutas?
+4. CONSISTENCIA: ¿Los datos del cliente son coherentes con lo que pide ahora?
 
-REGLAS DE DECISIÓN:
+🎯 FASE 2 - PLANIFICACIÓN (piensa antes de ejecutar):
+1. PLAN: ¿Qué herramientas debo usar y en qué orden específico?
+2. PARÁMETROS: ¿Tengo TODOS los parámetros necesarios o debo preguntar primero?
+3. VALIDACIÓN: ¿Los IDs y datos que voy a usar son correctos y actuales?
+4. ALTERNATIVAS: Si algo falla, ¿cuál es mi plan B?
+
+⚡ FASE 3 - EJECUCIÓN Y VERIFICACIÓN:
 - Si falta información crítica (ej: DNI, fecha, origen/destino) → PREGUNTAR primero
 - Si ya tengo los datos → EJECUTAR herramientas en secuencia lógica
 - Si una herramienta falla → ANALIZAR error y tomar acción alternativa
 - Después de ejecutar → VERIFICAR que el resultado es completo antes de responder
+- NUNCA inventes datos que no están en los resultados de las herramientas
 
 EJEMPLOS DE BUENAS DECISIONES:
 
@@ -2248,7 +2256,7 @@ app.post('/ai/document', async (req, reply) => {
     // Modo 'analyze': extraer texto y analizarlo con IA
     const settings = await prisma.settings.findUnique({ where: { tenantId: tenant.id } });
     const systemPrompt = settings?.systemPrompt ?? 'Eres un asistente útil que analiza documentos.';
-    const temperature = settings?.temperature ?? 0.7;
+    const temperature = settings?.temperature ?? 0.3;
     const maxTokens = settings?.maxTokens ?? 1000;
 
     // Seleccionar modelo (usar el por defecto del tenant ya que no hay imágenes)
