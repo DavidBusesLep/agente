@@ -425,16 +425,23 @@ Returns:
     - Si el usuario pregunta por un horario que no existe, solo ofrece los horarios REALES más cercanos de la lista
     - Al sugerir alternativas, COPIA EXACTAMENTE el horario de salida y llegada que aparece en los datos devueltos
     
-   IMPORTANTE: Siempre que muestres los horarios al usuario, debes usar el siguiente formato de tabla: no agregues nada al texto ni ** de mas para resaltar solo usa un * ni otra informacion que no esta aca detallada 
+   IMPORTANTE: Siempre que muestres los horarios al usuario, debes usar el siguiente formato de tabla EXACTO con espacios para alineación en WhatsApp:
+    
     Origen a Destino DD-MM-YYYY
     *Salida* - *Llegada*
-    *Programada* - *Estimada*
-            06:15                07:30
-            08:30                09:45
-            10:30                11:45
-    Tarifa Ida: $ [MONTO MINIMO] - $ [MONTO MAXIMO]
-    Promoción Ida y Vuelta: $ [MONTO_IDA_VUELTA]
-    NO incluyas detalles de servicio (Semicama, Directo, etc) en la tabla. 
+    *Programada*  *Estimada*
+           05:14              08:54
+           06:00              09:00
+           06:01              09:41
+           08:00              11:00
+    
+    Tarifa Ida: $[MONTO MINIMO] - $[MONTO MAXIMO]
+    Promoción Ida y Vuelta: $[MONTO_IDA_VUELTA]
+    
+    - Usa espacios para alinear los horarios de forma vertical
+    - Los horarios deben estar indentados con espacios al inicio
+    - NO agregues nada al texto ni ** de más para resaltar, solo usa un *
+    - NO incluyas detalles de servicio (Semicama, Directo, etc) en la tabla 
 
     Ejecuta: Sp_WSOpenAiListarHorariosV2
     
