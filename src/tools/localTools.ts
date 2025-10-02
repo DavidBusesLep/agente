@@ -425,22 +425,23 @@ Returns:
     - Si el usuario pregunta por un horario que no existe, solo ofrece los horarios REALES más cercanos de la lista
     - Al sugerir alternativas, COPIA EXACTAMENTE el horario de salida y llegada que aparece en los datos devueltos
     
-   IMPORTANTE: Siempre que muestres los horarios al usuario, debes usar el siguiente formato de tabla EXACTO con espacios para alineación en WhatsApp:
+   IMPORTANTE: Siempre que muestres los horarios al usuario, debes usar formato de código monoespaciado para que WhatsApp respete los espacios.
     
+    Formato a usar:
     Origen a Destino DD-MM-YYYY
-    *Salida* - *Llegada*
-    *Programada*  *Estimada*
-           05:14              08:54
-           06:00              09:00
-           06:01              09:41
-           08:00              11:00
-    
+    [AQUÍ INICIA BLOQUE DE CÓDIGO CON 3 ACENTOS GRAVES]
+    Salida  Llegada
+    05:14   08:54
+    06:00   09:00
+    06:01   09:41
+    08:00   11:00
+    [AQUÍ TERMINA BLOQUE DE CÓDIGO CON 3 ACENTOS GRAVES]
     Tarifa Ida: $[MONTO MINIMO] - $[MONTO MAXIMO]
     Promoción Ida y Vuelta: $[MONTO_IDA_VUELTA]
     
-    - Usa espacios para alinear los horarios de forma vertical
-    - Los horarios deben estar indentados con espacios al inicio
-    - NO agregues nada al texto ni ** de más para resaltar, solo usa un *
+    - DEBES usar 3 acentos graves (backticks) al inicio y al final para crear un bloque de código
+    - Dentro del bloque de código, alinea las columnas con espacios
+    - NO uses asteriscos (*) dentro del bloque de código
     - NO incluyas detalles de servicio (Semicama, Directo, etc) en la tabla 
 
     Ejecuta: Sp_WSOpenAiListarHorariosV2
