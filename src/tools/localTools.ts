@@ -416,7 +416,7 @@ Returns:
     - Para cualquier otra hora específica → Busca el horario exacto o los más cercanos
     - Sin hora → Devuelve todos los horarios del día
     - NOTA: Los horarios siempre se devuelven ordenados cronológicamente por hora de salida
-
+    - NO CONFUNDAS LOS HORARIOS DE SALIDA CON LOS HORARIOS DE LLEGADA !!!
    IMPORTANTE: Siempre que muestres los horarios al usuario, debes usar el siguiente formato de tabla: no agregues nada al texto ni ** de mas para resaltar solo usa un * ni otra informacion que no esta aca detallada 
     Origen a Destino DD-MM-YYYY
     *Salida* - *Llegada*
