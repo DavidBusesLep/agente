@@ -233,12 +233,48 @@ Campos de salida comunes: iso, display, year, month, day, weekday. Para difs: di
   },
   {
     name: 'get_origin_locations',
-    description: `Lista todas las localidades de origen disponibles.
-No requiere parámetros.
+    description: `Lista todas las localidades de origen disponibles con sus IDs.
+
+⚠️ CUÁNDO USAR ESTA HERRAMIENTA (MUY IMPORTANTE):
+- Al INICIO de CUALQUIER consulta de rutas o horarios
+- Cuando el usuario menciona una ciudad y necesitas su ID
+- ANTES de usar verify_route o get_schedules
+- SIEMPRE que necesites un ID de localidad
+
+📝 PROCESO PASO A PASO:
+1. Ejecutar get_origin_locations() → Obtener lista completa
+2. Buscar el nombre exacto o similar en la lista
+3. Extraer el ID de esa localidad
+4. Usar ese ID en verify_route, get_schedules, etc.
+
+❌ ERRORES A EVITAR:
+- NUNCA asumas ni inventes IDs de localidades
+- NUNCA uses números aleatorios como IDs
+- Si no encuentras la localidad, informa que no está disponible
+
+EJEMPLO DE USO CORRECTO:
+Usuario: "Quiero viajar de Río Cuarto a Córdoba"
+1. get_origin_locations() devuelve:
+   [
+     {"Id": 1, "Nombre": "Río Cuarto"},
+     {"Id": 6, "Nombre": "Córdoba"},
+     {"Id": 10, "Nombre": "Buenos Aires"},
+     ...
+   ]
+2. Buscar "Río Cuarto" → ID: 1
+3. Buscar "Córdoba" → ID: 6
+4. Ahora usar: verify_route(loc_origen=1, loc_destino=6)
+
 Ejecuta: Sp_WSOpenAiLocalidadesOrigenV2
-Necesario para conocer los IDs de las localidades para ejecutar próximas herramientas.
+No requiere parámetros.
+
 Returns:
-  Dict con lista de localidades de origen con ID y nombre`,
+  {
+    "Localidades": [
+      {"Id": number, "Nombre": string},
+      ...
+    ]
+  }`,
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     execute: async () => await getAllOriginLocationsFromDb()
   },
@@ -378,18 +414,32 @@ Returns:
   {
     name: 'verify_route',
     description: `Verifica si existe una ruta de autobús entre dos localidades usando sus IDs.
-    
-REGLA CRÍTICA: Antes de usar esta herramienta, DEBES obtener los IDs de las localidades de origen y destino utilizando la herramienta \`select_location_from_list\`.
-NO asumas ni inventes IDs. Si la herramienta de selección devuelve un error, significa que no se encontró la localidad y debes informar al usuario.
 
-Ejecuta: Sp_WSOpenAiLocalidadesDestinoV2. Si el resultado es false (no hay datos), debes informar al usuario que no existe una ruta directa y transferir la consulta.
-si el resultado es false informar al usuario que no hacemos esa ruta
+⚠️ FLUJO OBLIGATORIO PASO A PASO:
+1. PRIMERO: Ejecutar get_origin_locations para obtener TODOS los IDs disponibles
+2. SEGUNDO: Buscar las localidades mencionadas por el usuario en el resultado
+3. TERCERO: Ejecutar verify_route con los IDs encontrados
+
+❌ NUNCA asumas ni inventes IDs de localidades
+❌ Si no encuentras una localidad en get_origin_locations, informa que no está disponible
+
+EJEMPLO COMPLETO:
+Usuario: "Quiero viajar de Río Cuarto a Córdoba"
+1. get_origin_locations() → Buscar "Río Cuarto" (Id: 1) y "Córdoba" (Id: 6)
+2. verify_route(loc_origen=1, loc_destino=6)
+
+SI EL RESULTADO ES FALSE:
+Responder: "Lo siento, no tenemos rutas directas entre [origen] y [destino]"
+
+Ejecuta: Sp_WSOpenAiLocalidadesDestinoV2
+
 Args:
-    parametros: JSON string con loc_origen, loc_destino.
-               Ejemplo: '{"loc_origen": 1, "loc_destino": 10}'
+    loc_origen (int): ID de la localidad de origen (obtenido de get_origin_locations)
+    loc_destino (int): ID de la localidad de destino (obtenido de get_origin_locations)
+    Ejemplo: {"loc_origen": 1, "loc_destino": 10}
         
 Returns:
-    Dict indicando si la ruta existe`,
+    {"Resultado": true/false, "data": [...]}`,
     parameters: { type: 'object', properties: { loc_origen: { type: 'integer' }, loc_destino: { type: 'integer' } }, required: ['loc_origen', 'loc_destino'], additionalProperties: false },
     execute: async (args) => {
       const res = await execSP('Sp_WSOpenAiLocalidadesDestinoV2', { PLocOrigen: args.loc_origen, PLocDestino: args.loc_destino });
@@ -406,9 +456,27 @@ Returns:
   {
     name: 'get_schedules',
     description: `Lista horarios disponibles para una ruta y fecha específica.
-    - Antes de ejecutar esta herramienta, verifica si existe la ruta con \`verify_route\`.
-    - La fecha debe estar en formato YYYYMMDD.
-    - La hora es opcional (formato HH:MM). 
+
+⚠️ FORMATO DE FECHA REQUERIDO: YYYYMMDD (sin guiones, barras ni espacios)
+- ✅ Formato correcto: "20251003"
+- ❌ Formato incorrecto: "2025-10-03", "03/10/2025", "03-10-2025"
+
+💡 CÓMO OBTENER LA FECHA CORRECTA:
+1. Si el usuario dice "mañana", "próximo viernes", etc → Usar get_date_info primero
+2. get_date_info devuelve formato ISO: {"iso": "2025-10-03"}
+3. Convertir ISO a YYYYMMDD quitando guiones: "20251003"
+4. Usar ese formato en get_schedules
+
+EJEMPLO COMPLETO:
+Usuario: "Quiero viajar mañana"
+1. get_date_info("mañana") → {"iso": "2025-10-04", "day": 4, "month": 10, "year": 2025}
+2. Convertir: "2025-10-04" → "20251004"
+3. get_schedules(id_loc_origen=1, id_loc_destino=6, fecha="20251004")
+
+PRERREQUISITOS:
+- Ejecutar get_origin_locations para obtener IDs
+- Ejecutar verify_route para confirmar que existe la ruta
+- La hora es opcional (formato HH:MM) 
     
     **FILTROS ESPECIALES DE HORARIOS:**
     - Si hora = "12:00" → Devuelve TODOS los horarios desde las 12:00 en adelante (tarde/después del mediodía)
@@ -489,7 +557,7 @@ Returns:
         
     Returns:
         Dict con una lista de 'butacas_sugeridas' y un 'detalle' de la sugerencia.`,
-    parameters: { type: 'object', properties: { id_horario: { type: 'string' }, id_loc_desde: { type: 'integer' }, id_loc_hasta: { type: 'integer' }, cantidad_pasajeros: { type: 'integer' }, tipo_butaca: { type: 'string' } }, required: ['id_horario', 'id_loc_desde', 'id_loc_hasta'], additionalProperties: true },
+    parameters: { type: 'object', properties: { id_horario: { type: 'string' }, id_loc_desde: { type: 'integer' }, id_loc_hasta: { type: 'integer' }, cantidad_pasajeros: { type: 'integer' }, tipo_butaca: { type: 'string' } }, required: ['id_horario', 'id_loc_desde', 'id_loc_hasta', 'cantidad_pasajeros'], additionalProperties: true },
     execute: async (args) => {
       const res = await execSP('Sp_WSOpenAiEstadoPlantaHorarioV2', { id_horario: args.id_horario, PId_LocalidadDesde: args.id_loc_desde, PId_LocalidadHasta: args.id_loc_hasta });
       if (!res.success) return { error: res.error };
@@ -675,11 +743,45 @@ Returns:
   {
     name: 'create_shopping_cart',
     description: `Crea un nuevo carrito de compras para iniciar el proceso de reserva.
-    - este numero es unico por compra y se debe usar siempre que se inicie una nueva compra. en un carrito puede haber multiples reservas.
-    Ejecuta: sp_carrito_compras_create
-    
-    Returns:
-        Dict con ID del carrito creado
+
+⚠️ CUÁNDO CREAR UN CARRITO NUEVO:
+- Al INICIAR una nueva reserva/venta (primera vez en la conversación)
+- UNA SOLA VEZ por transacción completa
+- ANTES de llamar a add_to_cart por primera vez
+- El carrito puede contener múltiples pasajeros y múltiples tramos
+
+⚠️ CUÁNDO NO CREAR CARRITO NUEVO:
+- ❌ Si ya creaste uno en esta conversación (reutiliza el ID)
+- ❌ Al agregar más pasajeros a una reserva en curso
+- ❌ Al agregar un tramo de vuelta (usa el mismo carrito de la ida)
+
+📝 FLUJO TÍPICO COMPLETO:
+Usuario: "Quiero 2 pasajes para mañana"
+
+1. [Buscar horarios y obtener DNIs...]
+2. ⚡ create_shopping_cart() 
+   → Devuelve: {"carrito": [{"Id_carrito": 12345}]}
+   → 💾 GUARDAR en memoria: id_carrito = 12345
+
+3. ⚡ add_to_cart(id_carrito=12345, dni="12345678", numero_butaca=10, ...)
+4. ⚡ add_to_cart(id_carrito=12345, dni="87654321", numero_butaca=11, ...)
+   ↑ Mismo id_carrito para ambos pasajeros
+   
+5. ⚡ finalize_sale(id_carrito=12345)
+
+💡 REGLA DE ORO: Un carrito = Una transacción completa = Múltiples pasajeros si es necesario
+
+Ejecuta: sp_carrito_compras_create
+No requiere parámetros.
+
+Returns:
+  {
+    "carrito": [
+      {"Id_carrito": 12345}
+    ]
+  }
+  
+⚠️ IMPORTANTE: Extrae y guarda el Id_carrito del resultado para usarlo en add_to_cart
 `,
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     execute: async () => {
