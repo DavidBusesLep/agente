@@ -219,15 +219,25 @@ export const localTools: LocalToolDef[] = [
   {
     name: 'get_date_info',
     description: `Herramienta de fecha confiable. Interpreta instrucciones en español y devuelve resultados exactos.
-Usos típicos: "cuándo es el próximo miércoles", "próximo mes/año", "qué año es el próximo 25/12", "diferencia en días entre 01/09 y 25/09", "fecha actual".
-Siempre responde con fechas precisas basadas en el reloj del servidor.
-Campos de salida comunes: iso, display, year, month, day, weekday. Para difs: diff.days, diff.months.`,
-    parameters: { type: 'object', properties: { instruction: { type: 'string' }, reference_date: { type: 'string' } }, required: ['instruction'], additionalProperties: false },
-    execute: async (args) => await executeGetDateInfo(args)
-  },
-  {
-    name: 'getDateInfo',
-    description: `Alias de get_date_info. Usa este nombre si el modelo prefiere camelCase.`,
+
+⚠️ CUÁNDO USAR:
+- Cuando el usuario usa fechas relativas: "mañana", "próximo lunes", "la semana que viene"
+- Para calcular fechas futuras: "en 3 días", "el próximo 25 de diciembre"
+- Para diferencias entre fechas: "cuántos días hay entre el 1 y el 15"
+- Para obtener la fecha actual del sistema
+
+💡 IMPORTANTE: Esta herramienta devuelve la fecha en formato ISO (YYYY-MM-DD) en el campo "iso"
+Debes usar este formato y convertirlo a YYYYMMDD (sin guiones) para get_schedules
+
+EJEMPLOS DE USO:
+- Usuario: "Quiero viajar mañana" → get_date_info("mañana") → {"iso": "2025-10-04"}
+- Usuario: "El próximo viernes" → get_date_info("próximo viernes") → {"iso": "2025-10-10"}
+- Usuario: "Hoy" → get_date_info("fecha actual") → {"iso": "2025-10-03"}
+
+Campos de salida: iso, display, year, month, day, weekday
+Para diferencias: diff.days, diff.months
+
+Ejecuta cálculos de fecha precisos basados en el reloj del servidor.`,
     parameters: { type: 'object', properties: { instruction: { type: 'string' }, reference_date: { type: 'string' } }, required: ['instruction'], additionalProperties: false },
     execute: async (args) => await executeGetDateInfo(args)
   },
@@ -281,18 +291,46 @@ Returns:
   {
     name: 'search_customer_data',
     description: `Busca datos del cliente en la base de datos.
-- IMPORTANTE: No preguntes por el tipo de documento. Asume siempre DNI (ID 1) a menos que el usuario aclare explícitamente otro.
-- Usa esta función cuando el cliente te da su número de documento.
+
+⚠️ CUÁNDO USAR:
+- Cuando el usuario proporciona su DNI
+- ANTES de pedir datos personales completos
+- ANTES de crear una reserva
+
+⚠️ IMPORTANTE:
+- No preguntes por el tipo de documento. Asume siempre DNI (ID 1) a menos que el usuario aclare explícitamente otro.
 - No es necesario preguntar si el cliente ya está registrado; simplemente busca con esta función.
+
 Ejecuta: Sp_WSOpenAiBuscarDatosCliente
 
 Args:
-  parametros: JSON string con nro_doc y opcionalmente id_tipo_doc.
-            Ejemplo: '{"nro_doc": "12345678"}'
-            Ejemplo 2: '{"id_tipo_doc": 2, "nro_doc": "AB12345"}'
+  nro_doc (string): Número de documento del cliente
+  id_tipo_doc (int, opcional): Tipo de documento (default: 1 = DNI)
+  
+  Ejemplo: {"nro_doc": "12345678"}
+  Ejemplo 2: {"id_tipo_doc": 2, "nro_doc": "AB12345"}
 
 Returns:
-  Dict con datos del cliente si existe, array vacío si no existe`,
+  {"cliente": [...]} - Array con datos si existe, array vacío si no existe
+
+📝 INTERPRETACIÓN DEL RESULTADO:
+
+✅ SI DEVUELVE DATOS (cliente existe):
+- Extraer el nombre y apellido del resultado
+- Confirmar con el usuario: "Encontré tu registro: [Nombre] [Apellido]. ¿Es correcto?"
+- Continuar con el proceso de reserva
+
+❌ SI DEVUELVE ARRAY VACÍO (cliente NO existe):
+- Informar: "No encontré tu DNI en el sistema. Para registrarte necesito:"
+  1. Nombre completo
+  2. Apellido
+  3. Fecha de nacimiento (formato: DD/MM/YYYY)
+  4. Género (Masculino/Femenino)
+- Después ejecutar add_customer con esos datos
+
+⚠️ SI DEVUELVE ERROR:
+- Informar: "Hubo un problema al buscar tus datos. ¿Me podés confirmar tu DNI?"
+- NO continuar con la reserva hasta resolver el problema`,
     parameters: {
       type: 'object',
       properties: {
@@ -321,17 +359,59 @@ Returns:
   {
     name: 'add_customer',
     description: `Agrega un nuevo cliente a la base de datos.
-- Ejecutar esta función solo si search_customer_data devolvió un cliente vacío.
-- IMPORTANTE: No preguntes por el tipo de documento. Asume siempre DNI (ID 1) a menos que el usuario aclare explícitamente otro.
-- El id_pais para Argentina es 1.
+
+⚠️ CUÁNDO USAR:
+- Solo si search_customer_data devolvió un array vacío (cliente no existe)
+- Después de pedir todos los datos necesarios al usuario
+
+⚠️ DATOS REQUERIDOS:
+Antes de ejecutar esta función, debes tener:
+1. DNI del cliente
+2. Nombre completo
+3. Apellido
+4. Fecha de nacimiento (formato: YYYY-MM-DD)
+5. Género: 1 = Masculino, 2 = Femenino
+6. País (default: 1 = Argentina)
+
+💡 SOBRE EL GÉNERO:
+- Pregunta: "¿Sos masculino o femenino?"
+- NO asumas el género basado en el nombre
+- Valor 1 = Masculino
+- Valor 2 = Femenino
+
+💡 SOBRE LA FECHA DE NACIMIENTO:
+- Formato requerido: YYYY-MM-DD (ejemplo: "1990-05-15")
+- Si el usuario da solo la edad, calcula: año_actual - edad
+- Si da formato DD/MM/YYYY, convertir a YYYY-MM-DD
+
+⚠️ IMPORTANTE:
+- No preguntes por el tipo de documento. Asume siempre DNI (ID 1) a menos que el usuario aclare explícitamente otro.
+- El id_pais para Argentina es 1 (default)
+
 Ejecuta: Sp_WSOpenAiAgregarCliente
 
 Args:
-  parametros: JSON con id_tipo_doc, dni, nombre, apellido, fecha_nac, genero, id_pais.
-  Ejemplo: '{"id_tipo_doc": 1, "dni": "12345678", "nombre": "Juan", "apellido": "Perez", "fecha_nac": "1990-01-01", "genero": 1, "id_pais": 1}'
+  - id_tipo_doc (int, opcional): Tipo de documento (default: 1 = DNI)
+  - dni (string): Número de documento
+  - nombre (string): Nombre del cliente
+  - apellido (string): Apellido del cliente
+  - fecha_nac (string): Fecha de nacimiento en formato YYYY-MM-DD
+  - genero (int): 1 = Masculino, 2 = Femenino
+  - id_pais (int, opcional): ID del país (default: 1 = Argentina)
+
+Ejemplo: {
+  "id_tipo_doc": 1,
+  "dni": "12345678",
+  "nombre": "Juan",
+  "apellido": "Perez",
+  "fecha_nac": "1990-01-01",
+  "genero": 1,
+  "id_pais": 1
+}
 
 Returns:
-  Dict con resultado de la operación.`,
+  {"Resultado": true, "mensaje": "Cliente agregado exitosamente"}
+  o {"Resultado": false, "error": "..."}`,
     parameters: {
       type: 'object',
       properties: {
@@ -383,13 +463,35 @@ Returns:
   },
   {
     name: 'get_document_types',
-    description: `Herramienta no es necesaria ejecutar si el cliente no especifica tipo de dni o se duda que es extranjero, simpre intentar asumir que es dni (1)
-    Lista todos los tipos de documentos disponibles con sus IDs.
-    No requiere parámetros.
-    Ejecuta: Sp_WSListarTiposDNI
-    
-    Returns:
-        Dict con lista de tipos de documentos (DNI, LC, CI, etc.)
+    description: `Lista todos los tipos de documentos disponibles con sus IDs.
+
+⚠️ RARAMENTE NECESARIA:
+La mayoría de los clientes usan DNI (ID: 1). Solo ejecutar si el cliente menciona explícitamente otro tipo de documento.
+
+❌ CUÁNDO NO USAR:
+- Si el cliente solo da un número sin especificar tipo → Asumir DNI
+- Para clientes argentinos en general → Asumir DNI
+- Si el cliente no menciona nada sobre el tipo de documento → Asumir DNI
+
+✅ CUÁNDO SÍ USAR:
+- Cliente dice explícitamente: "no tengo DNI", "tengo pasaporte", "mi documento es CI"
+- Cliente extranjero menciona "pasaporte" o documento de su país
+- Cliente pregunta: "¿qué documentos aceptan?"
+
+Ejecuta: Sp_WSListarTiposDNI
+No requiere parámetros.
+
+Returns:
+  {
+    "tipos_dni": [
+      {"Id": 1, "Descripcion": "DNI"},
+      {"Id": 2, "Descripcion": "Pasaporte"},
+      {"Id": 3, "Descripcion": "CI"},
+      ...
+    ]
+  }
+
+💡 REGLA DE ORO: Siempre intentar asumir que es DNI (ID: 1) primero
         `,
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     execute: async () => {
@@ -792,23 +894,65 @@ Returns:
   {
     name: 'add_to_cart',
     description: `Agrega UNA reserva INDIVIDUAL al carrito. Debes llamar esta herramienta una vez por cada pasajero.
-    
-    **Recordatorio**: NO uses el mismo DNI para varias butacas. Cada llamada a esta función debe ser para un pasajero y butaca únicos.
 
-    - **IMPORTANTE**: No preguntes por el tipo de documento. Asume siempre DNI (ID 1) a menos que el usuario aclare explícitamente otro.
-    - Prerrequisitos: get_schedules, get_available_seats, search_customer_data.
-    Ejecuta: sp_carrito_compras_insertV2
-    
-    Args:
-        parametros: JSON string con:
-            - id_carrito, id_horario, id_localidad_origen, id_localidad_destino, id_tipo_doc, dni, numero_butaca
-            - tipo_venta: String corto indicando el tipo ("link", "beg", "bec", etc.)
-            - con_vuelta_abierta: "si" o "no" - para boletos con fecha de regreso abierta
-        
-        Ejemplo: '{"id_carrito": 123, "id_horario": "1-2-3", ..., "tipo_venta": "link", "con_vuelta_abierta": "no"}'
-        
-    Returns:
-        Dict con resultado de la operación
+⚠️ REGLA CRÍTICA - LLAMADAS MÚLTIPLES:
+Esta herramienta se ejecuta UNA VEZ por CADA pasajero
+- 1 pasajero = 1 llamada a add_to_cart
+- 2 pasajeros = 2 llamadas a add_to_cart (mismo id_carrito)
+- 3 pasajeros = 3 llamadas a add_to_cart (mismo id_carrito)
+
+❌ ERRORES A EVITAR:
+- NO uses el mismo DNI para varias butacas
+- NO crees múltiples carritos para una misma compra
+- NO llames esta función sin haber llamado create_shopping_cart primero
+
+📝 EJEMPLO COMPLETO - 2 PASAJEROS:
+
+Usuario: "Quiero 2 pasajes para mañana"
+1. [Buscar horarios y asientos...]
+2. Pedir DNI de AMBOS pasajeros
+3. create_shopping_cart() → Devuelve id_carrito = 12345
+4. add_to_cart({
+     "id_carrito": 12345,
+     "id_horario": "1-6-9902",
+     "id_localidad_origen": 1,
+     "id_localidad_destino": 6,
+     "dni": "12345678",  ← DNI PASAJERO 1
+     "numero_butaca": 10,
+     "tipo_venta": "link",
+     "con_vuelta_abierta": "no"
+   })
+5. add_to_cart({
+     "id_carrito": 12345,  ← MISMO ID_CARRITO
+     "id_horario": "1-6-9902",
+     "id_localidad_origen": 1,
+     "id_localidad_destino": 6,
+     "dni": "87654321",  ← DNI PASAJERO 2 (DIFERENTE)
+     "numero_butaca": 11,  ← BUTACA DIFERENTE
+     "tipo_venta": "link",
+     "con_vuelta_abierta": "no"
+   })
+6. finalize_sale(id_carrito=12345)
+
+⚠️ IMPORTANTE:
+- No preguntes por el tipo de documento. Asume siempre DNI (ID 1) a menos que el usuario aclare explícitamente otro.
+- Prerrequisitos: get_schedules, get_available_seats, search_customer_data, create_shopping_cart
+
+Ejecuta: sp_carrito_compras_insertV2
+
+Args:
+  - id_carrito (int): ID del carrito (obtenido de create_shopping_cart)
+  - id_horario (string): ID del horario seleccionado
+  - id_localidad_origen (int): ID de la localidad de origen
+  - id_localidad_destino (int): ID de la localidad de destino
+  - dni (string): DNI del pasajero (ÚNICO por llamada)
+  - numero_butaca (int): Número de butaca asignada
+  - id_tipo_doc (int, opcional): Tipo de documento (default: 1 = DNI)
+  - tipo_venta (string, opcional): Tipo de venta (default: "link")
+  - con_vuelta_abierta (string, opcional): "si" o "no" (default: "no")
+
+Returns:
+  Dict con resultado de la operación (success: true/false)
 `,
     parameters: { type: 'object', properties: { id_carrito: { type: 'integer' }, id_horario: { type: 'string' }, id_localidad_origen: { type: 'integer' }, id_localidad_destino: { type: 'integer' }, id_tipo_doc: { type: 'integer' }, dni: { type: 'string' }, numero_butaca: { type: 'integer' }, tipo_venta: { type: 'string' }, con_vuelta_abierta: { type: 'string' } }, required: ['id_carrito', 'id_horario', 'id_localidad_origen', 'id_localidad_destino', 'dni', 'numero_butaca'], additionalProperties: true },
     execute: async (args) => {

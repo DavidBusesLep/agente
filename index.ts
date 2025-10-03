@@ -1084,8 +1084,7 @@ app.post('/api/settings', { preHandler: authGuard }, async (req: any, reply) => 
     aiEndpointUrl: z.string().url().optional(),
     aiForwardApiKey: z.string().optional(),
     // Knobs específicos GPT-5
-    gpt5ReasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
-    gpt5Verbosity: z.enum(['brief', 'balanced', 'verbose']).optional()
+    gpt5ReasoningEffort: z.enum(['low', 'medium', 'high']).optional()
   });
   const body = bodySchema.parse(req.body);
   const defaults = {
@@ -1297,7 +1296,8 @@ const AiAnswerRequestSchema = z.object({
     result: z.unknown().optional()
   })).optional().default([]),
   // Resumen/es previos (persistidos por el integrador) para inyectar como contexto
-  conversation_summary_in: z.union([z.string(), z.array(z.string())]).optional(),
+  // Acepta: string, array de strings, o array de objetos (se normalizará después)
+  conversation_summary_in: z.union([z.string(), z.array(z.string()), z.array(z.unknown())]).optional(),
   // Controlar si el endpoint debe devolver un resumen actualizado (por defecto, sí)
   return_summary: z.boolean().optional().default(true)
 });
@@ -1460,6 +1460,9 @@ app.post('/ai/answer', async (req, reply) => {
   const systemPrompt = settings?.systemPrompt ?? '';
   const temperature = settings?.temperature ?? 0.3;
   const maxTokens = settings?.maxTokens ?? 1000;
+  
+  // Parámetros específicos para GPT-5/o1 (control de tiempo de razonamiento)
+  const gpt5ReasoningEffort = settings?.gpt5ReasoningEffort ?? 'low';  // default: 'low' para ser más rápido
 
   // 1-2. Detectar si la conversación contiene imágenes o documentos
   const hasImages = parsed.conversation.some(msg => 
@@ -1604,18 +1607,101 @@ app.post('/ai/answer', async (req, reply) => {
   const yyyyEs = new Intl.DateTimeFormat('es-ES', { year: 'numeric', timeZone: tz }).format(nowForCtx);
   const dateCtx = `CONTEXTO DE FECHA: Hoy es ${capitalize(dayNameEs)} ${ddEs} de ${capitalize(monthNameEs)} de ${yyyyEs}. Para cálculos de fechas usá la función get_date_info. Las fechas relativas ya están resueltas automáticamente.`;
   
+  const activeListeningPolicy = `🎯 ESCUCHA ACTIVA Y EXTRACCIÓN DE INFORMACIÓN (CRÍTICO):
+
+⚠️ ANTES DE RESPONDER, DEBES LEER CUIDADOSAMENTE TODO EL MENSAJE DEL USUARIO Y EXTRAER:
+
+📍 INFORMACIÓN DE VIAJE:
+- Origen (ciudad de salida): ¿Lo mencionó?
+- Destino (ciudad de llegada): ¿Lo mencionó?
+- Fecha de ida: ¿Dijo "mañana", "el lunes", fecha específica?
+- Fecha de vuelta: ¿Mencionó regreso? ¿Mismo día? ¿Fecha diferente?
+- Cantidad de pasajeros: ¿Dijo cuántos viajan?
+- Horario preferido: ¿Mencionó hora específica o periodo (mañana/tarde)?
+
+👤 INFORMACIÓN DEL PASAJERO:
+- DNI: ¿Dio su número de documento?
+- Nombre: ¿Mencionó su nombre?
+- Datos adicionales: ¿Fecha de nacimiento, género, etc.?
+
+⚠️ REGLA DE ORO - NUNCA PREGUNTES LO QUE YA SABES:
+❌ MAL: Usuario dice "Quiero viajar de Río Cuarto a Córdoba mañana"
+        → Responder: "¿A dónde querés viajar?"
+        
+✅ BIEN: Usuario dice "Quiero viajar de Río Cuarto a Córdoba mañana"
+        → Extraer: origen=Río Cuarto, destino=Córdoba, fecha=mañana
+        → Ejecutar: get_date_info("mañana") + get_origin_locations + buscar horarios
+        → Responder con HORARIOS DISPONIBLES
+
+❌ MAL: Usuario dice "Despeñaderos a Córdoba el lunes, vuelvo el mismo día"
+        → Responder: "¿A dónde querés viajar?"
+        
+✅ BIEN: Usuario dice "Despeñaderos a Córdoba el lunes, vuelvo el mismo día"
+        → Extraer: origen=Despeñaderos, destino=Córdoba, fecha=lunes, ida_y_vuelta=true, mismo_dia=true
+        → Buscar horarios de IDA y VUELTA para ese día
+        → Preguntar solo: "¿Qué horario preferís para la ida y para la vuelta?"
+
+PROCESO OBLIGATORIO:
+1️⃣ LEE el mensaje completo del usuario
+2️⃣ EXTRAE toda la información mencionada
+3️⃣ IDENTIFICA qué información falta
+4️⃣ ACTÚA con lo que tienes (buscar horarios, etc.)
+5️⃣ PREGUNTA solo lo que realmente falta`;
+
   const nonNarrationPolicy = `REGLA DE ESTILO: Responde en español. No anuncies acciones futuras ni digas \"voy a\", \"ahora\", \"déjame\". Si ya tenés los datos necesarios, ejecuta los pasos y devuelve directamente el resultado final o la siguiente pregunta mínima imprescindible. Evita narración de proceso o intenciones.`;
   const noMarkdownLinksPolicy = `ENLACES: No uses formato Markdown para enlaces. Pega siempre las URLs completas en texto plano (ej.: https://... ).`;
-  const dataIntegrityPolicy = `DATOS DINÁMICOS (OBLIGATORIO): Nunca inventes horarios, precios, asientos, ni disponibilidad. Cuando el usuario pida horarios, “pasame de nuevo”, reservar, o el RESUMEN HISTÓRICO mencione horarios/tarifas/fechas, DEBES consultar herramientas (get_schedules, get_available_seats, get_prices) con los parámetros actuales (ruta y fecha) o preguntar los que falten. Si los datos podrían haber cambiado respecto a lo conversado antes, revalídalos con tools antes de responder.`;
+  
+  const antiHallucinationPolicy = `🛡️ POLÍTICA ANTI-ALUCINACIÓN (CRÍTICO - MÁXIMA PRIORIDAD):
+
+⛔ PROHIBIDO ABSOLUTAMENTE:
+- Inventar horarios que no están en los resultados de herramientas
+- Crear IDs de localidades que no existen
+- Mencionar precios no verificados
+- Sugerir números de butaca no disponibles
+- Usar palabras de aproximación para datos críticos
+
+❌ PALABRAS PROHIBIDAS para datos críticos (horarios, precios, butacas):
+- "aproximadamente", "alrededor de", "cerca de", "más o menos"
+- "sobre las", "tipo", "unos", "algunos"
+- Estas palabras SOLO se permiten para estimaciones no críticas
+
+✅ REGLA DE ORO: "DATOS EXACTOS O PREGUNTA"
+Si no tenés el dato exacto de una herramienta → NO lo inventes → PREGUNTÁ o ejecutá la herramienta
+
+✅ CÓMO VERIFICAR QUE NO ALUCINÁS:
+1. Horarios: SOLO menciona horarios que aparecen LITERALMENTE en get_schedules
+2. Localidades: SOLO usa IDs que devolvió get_origin_locations
+3. Butacas: SOLO menciona números que devolvió get_available_seats
+4. Precios: SOLO menciona tarifas de get_schedules o herramientas de precio
+
+✅ EJEMPLOS CORRECTOS:
+"Según los horarios consultados, las salidas son: 06:00, 08:00, 10:00"
+"Los asientos disponibles son: 10, 11, 12"
+"La tarifa es $29,950"
+
+❌ EJEMPLOS INCORRECTOS (ALUCINACIONES):
+"Hay un horario cerca de las 7:30" ← NO existe en la lista
+"Los precios rondan los $30,000" ← Usar precio EXACTO
+"Hay varios asientos del 10 al 20" ← SOLO mencionar los EXACTOS disponibles
+
+🎯 VERIFICACIÓN FINAL ANTES DE RESPONDER:
+¿Cada horario que menciono está en los resultados de herramientas? SI/NO
+¿Cada precio que menciono vino de una herramienta? SI/NO
+¿Cada ID que uso existe en los datos? SI/NO
+Si alguna respuesta es NO → NO enviar la respuesta → Reformular con datos exactos`;
+
+  const dataIntegrityPolicy = `DATOS DINÁMICOS (OBLIGATORIO): Nunca inventes horarios, precios, asientos, ni disponibilidad. Cuando el usuario pida horarios, "pasame de nuevo", reservar, o el RESUMEN HISTÓRICO mencione horarios/tarifas/fechas, DEBES consultar herramientas (get_schedules, get_available_seats, get_prices) con los parámetros actuales (ruta y fecha) o preguntar los que falten. Si los datos podrían haber cambiado respecto a lo conversado antes, revalídalos con tools antes de responder.`;
   
   const thinkingPolicy = `ESTRATEGIA DE PENSAMIENTO (OBLIGATORIO):
 Antes de responder o ejecutar herramientas, DEBES hacer un análisis profundo siguiendo estos pasos:
 
 🧠 FASE 1 - ANÁLISIS DE CONTEXTO (analiza internamente antes de actuar):
-1. CONTEXTO: ¿Qué información ya tengo de conversaciones anteriores? ¿Qué me falta?
-2. OBJETIVO: ¿Qué necesita exactamente el cliente? ¿Es claro o debo clarificar?
-3. DATOS DISPONIBLES: Revisa toda la conversación - ¿Ya se mencionaron horarios, fechas, DNI, rutas?
-4. CONSISTENCIA: ¿Los datos del cliente son coherentes con lo que pide ahora?
+1. MENSAJE ACTUAL: ¿Qué información específica mencionó el usuario AHORA? (origen, destino, fecha, DNI, etc.)
+2. CONTEXTO HISTÓRICO: ¿Qué información ya tengo de conversaciones anteriores?
+3. INFORMACIÓN COMPLETA: Combinar mensaje actual + contexto histórico
+4. OBJETIVO: ¿Qué necesita exactamente el cliente? ¿Es claro o debo clarificar?
+5. DATOS DISPONIBLES: ¿Qué tengo? ¿Qué me falta realmente?
+6. CONSISTENCIA: ¿Los datos del cliente son coherentes con lo que pide ahora?
 
 🎯 FASE 2 - PLANIFICACIÓN (piensa antes de ejecutar):
 1. PLAN: ¿Qué herramientas debo usar y en qué orden específico?
@@ -1632,20 +1718,31 @@ Antes de responder o ejecutar herramientas, DEBES hacer un análisis profundo si
 
 EJEMPLOS DE BUENAS DECISIONES:
 
-Ejemplo 1 - Cliente pide pasaje pero NO da DNI:
+Ejemplo 1 - Cliente da TODA la información en un mensaje:
+Usuario: "Quiero reservar para el lunes Despeñaderos a Córdoba, vuelvo el mismo día"
+❌ MAL: Responder "¿A dónde querés viajar?" (¡Ya lo dijo!)
+✅ BIEN: 
+  1. Extraer: origen=Despeñaderos, destino=Córdoba, fecha=lunes, ida_vuelta=true
+  2. get_date_info("próximo lunes")
+  3. get_origin_locations → buscar IDs de Despeñaderos y Córdoba
+  4. get_schedules para IDA (lunes)
+  5. get_schedules para VUELTA (mismo lunes)
+  6. Mostrar horarios y preguntar: "¿Qué horario preferís para la ida y para la vuelta?"
+
+Ejemplo 2 - Cliente pide pasaje pero NO da DNI:
 ❌ MAL: Ejecutar search_customer_data sin DNI → fallará
 ✅ BIEN: "Para buscarte en el sistema, ¿me das tu DNI?"
 
-Ejemplo 2 - Cliente da DNI "12345678":
+Ejemplo 3 - Cliente da DNI "12345678":
 ✅ BIEN: Ejecutar search_customer_data con {"nro_doc": "12345678"}
   → Si devuelve datos: continuar con horarios
   → Si devuelve vacío: "No estás registrado, necesito tu nombre, apellido y fecha de nacimiento"
 
-Ejemplo 3 - Cliente dice "quiero viajar mañana":
+Ejemplo 4 - Cliente dice "quiero viajar mañana":
 ✅ BIEN: Primero get_date_info con "mañana" → obtener fecha exacta → get_schedules con esa fecha
 ❌ MAL: Intentar get_schedules directamente con "mañana"
 
-Ejemplo 4 - search_customer_data devuelve error:
+Ejemplo 5 - search_customer_data devuelve error:
 ✅ BIEN: "Hubo un problema al buscar tus datos. ¿Me confirmas tu DNI?"
 ❌ MAL: Seguir con add_to_cart sin datos de cliente
 
@@ -1654,13 +1751,25 @@ FLUJOS COMPLETOS:
 👤 Cliente nuevo: search_customer_data (vacío) → add_customer → continuar flujo
 📅 Fechas: get_date_info para calcular fechas relativas antes de buscar horarios`;
 
-  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n${dataIntegrityPolicy}\n\n${systemPrompt}` : `${dateCtx}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n${dataIntegrityPolicy}`;
+  const enhancedSystemPrompt = systemPrompt ? `${dateCtx}\n\n${antiHallucinationPolicy}\n\n${activeListeningPolicy}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n${dataIntegrityPolicy}\n\n${systemPrompt}` : `${dateCtx}\n\n${antiHallucinationPolicy}\n\n${activeListeningPolicy}\n\n${thinkingPolicy}\n\n${nonNarrationPolicy}\n${noMarkdownLinksPolicy}\n${dataIntegrityPolicy}`;
 
   const wantSummary = (parsed as any).return_summary !== false;
-  const incomingSummariesRaw = (parsed as any).conversation_summary_in as (string | string[] | undefined);
+  const incomingSummariesRaw = (parsed as any).conversation_summary_in as (string | string[] | any[] | undefined);
+  
+  // Normalizar conversation_summary_in: puede ser string, array de strings, o array de objetos
   const incomingSummaries: string[] = Array.isArray(incomingSummariesRaw)
-    ? incomingSummariesRaw.filter(s => typeof s === 'string' && s.trim())
-    : (incomingSummariesRaw ? [incomingSummariesRaw] : []);
+    ? incomingSummariesRaw
+        .map(item => {
+          // Si es string, usarlo directamente
+          if (typeof item === 'string') return item;
+          // Si es objeto, intentar extraer propiedades comunes de resumen
+          if (typeof item === 'object' && item !== null) {
+            return item.summary || item.text || item.content || item.message || JSON.stringify(item);
+          }
+          return '';
+        })
+        .filter(s => s && s.trim())
+    : (incomingSummariesRaw && typeof incomingSummariesRaw === 'string' ? [incomingSummariesRaw] : []);
 
   // Heurística simple: detectar intención de horarios/reserva para reforzar uso de tools
   const lastUserMsg: any = [...conversationWithResolvedDates].reverse().find((m: any) => m.role === 'user');
@@ -1724,7 +1833,8 @@ FLUJOS COMPLETOS:
     temperature,
     maxTokens,
     toolsEnabled: toolsAllowed,
-    trace: parsed.trace
+    trace: parsed.trace,
+    reasoningEffort: gpt5ReasoningEffort as 'low' | 'medium' | 'high'
   });
   const messages = run.messages as any[];
   const assistantMessage = run.final as any;

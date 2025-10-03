@@ -21,6 +21,7 @@ export type AgentRunInput = {
   maxTokens: number;
   toolsEnabled: boolean;
   trace?: boolean;
+  reasoningEffort?: 'low' | 'medium' | 'high';
 };
 
 const ToolCallSchema = z.object({
@@ -69,6 +70,55 @@ export class LangGraphOrchestrator {
     return { hasData, isEmpty, hasError };
   }
 
+  // Generar resumen de herramientas ejecutadas para inyectar en el contexto
+  private generateToolsSummary(tools: Array<{ name: string; args: any; result: any }>): string {
+    const summaries: string[] = [];
+    
+    for (const tool of tools) {
+      try {
+        if (tool.name === 'get_schedules' && tool.result?.Horarios) {
+          const horarios = tool.result.Horarios.slice(0, 20); // Limitar a 20 para no saturar
+          const times = horarios.map((h: any) => `${h.HoraSalida || h.horario_salida || 'N/A'}`).filter(Boolean);
+          if (times.length > 0) {
+            summaries.push(`📅 get_schedules: Horarios REALES disponibles: ${times.join(', ')}`);
+          }
+        } else if (tool.name === 'get_available_seats' && tool.result?.butacas) {
+          const butacas = tool.result.butacas.slice(0, 30);
+          const seats = butacas.map((b: any) => b.NumeroDeButaca).filter(Boolean);
+          if (seats.length > 0) {
+            summaries.push(`💺 get_available_seats: Butacas REALES disponibles: ${seats.join(', ')}`);
+          }
+        } else if (tool.name === 'get_origin_locations' && tool.result?.Localidades) {
+          const locs = tool.result.Localidades.slice(0, 15);
+          const locations = locs.map((l: any) => `${l.Nombre}(ID:${l.Id})`).filter(Boolean);
+          if (locations.length > 0) {
+            summaries.push(`📍 get_origin_locations: Localidades REALES: ${locations.join(', ')}`);
+          }
+        }
+      } catch (e) {
+        // Ignorar errores de parsing
+      }
+    }
+    
+    return summaries.length > 0 ? summaries.join('\n') : '';
+  }
+
+  // Detectar si la respuesta contiene datos críticos que deben verificarse
+  private containsCriticalData(content: string): boolean {
+    if (!content) return false;
+    
+    // Patrones de datos críticos
+    const patterns = [
+      /\b\d{1,2}:\d{2}\b/,  // Horarios (HH:MM)
+      /\$\s*\d+/,            // Precios ($xxxx)
+      /butaca\s*\d+/i,       // Números de butaca
+      /asiento\s*\d+/i,      // Números de asiento
+      /\bID[:\s]*\d+/i       // IDs
+    ];
+    
+    return patterns.some(pattern => pattern.test(content));
+  }
+
   async run(input: AgentRunInput) {
     const state: AgentState = {
       messages: [...input.messages],
@@ -84,7 +134,8 @@ export class LangGraphOrchestrator {
     let consecutiveToolCalls = 0;
 
     for (let round = 0; round < 16; round++) {
-      const resp = await this.openai.chat.completions.create({
+      // Construir parámetros base
+      const chatParams: any = {
         model: state.model,
         messages: state.messages as any,
         temperature: state.temperature,
@@ -93,7 +144,18 @@ export class LangGraphOrchestrator {
           ? this.tools.map(t => ({ type: 'function' as const, function: { name: t.name, description: t.description, parameters: t.schema } }))
           : undefined,
         tool_choice: state.toolsEnabled ? 'auto' : undefined
-      } as any);
+      };
+
+      // Agregar parámetros específicos para modelos o1/o1-pro (GPT-5)
+      // reasoning_effort: Controla cuánto "piensa" el modelo
+      // - 'low': Más rápido (~20-30s), menos preciso
+      // - 'medium': Balanceado (~40-60s)
+      // - 'high': Más lento (~80-120s), más preciso
+      if (input.reasoningEffort && (state.model.includes('o1') || state.model.includes('gpt-5'))) {
+        chatParams.reasoning_effort = input.reasoningEffort;
+      }
+
+      const resp = await this.openai.chat.completions.create(chatParams as any);
 
       const assistant = resp.choices?.[0]?.message as any;
       if (assistant) state.messages.push(assistant);
@@ -107,6 +169,45 @@ export class LangGraphOrchestrator {
 
       if (!tcalls || !tcalls.length) {
         consecutiveToolCalls = 0;
+        
+        // Antes de devolver la respuesta final, inyectar recordatorio anti-alucinación
+        // con los datos disponibles de las herramientas ejecutadas
+        if (state.contextToolsOut.length > 0 && assistant?.content) {
+          const toolsSummary = this.generateToolsSummary(state.contextToolsOut);
+          if (toolsSummary) {
+            // Agregar mensaje de sistema con recordatorio de datos disponibles
+            state.messages.push({
+              role: 'system',
+              content: `🛡️ VERIFICACIÓN ANTI-ALUCINACIÓN:
+Antes de enviar tu respuesta, verifica que SOLO menciones datos que están en las herramientas ejecutadas:
+
+${toolsSummary}
+
+⚠️ Si tu respuesta menciona horarios, precios, IDs o butacas QUE NO están en esta lista, CORRÍGELA AHORA.
+Si no estás seguro, es mejor NO mencionar el dato.`
+            } as any);
+            
+            // Hacer una llamada adicional al LLM para que revise su respuesta
+            // (solo si la respuesta contiene datos numéricos o de horarios)
+            if (this.containsCriticalData(assistant.content)) {
+              const verificationResp = await this.openai.chat.completions.create({
+                model: state.model,
+                messages: state.messages as any,
+                temperature: state.temperature,
+                max_tokens: state.maxTokens
+              } as any);
+              
+              const verifiedAssistant = verificationResp.choices?.[0]?.message;
+              if (verifiedAssistant) {
+                // Reemplazar la respuesta original con la verificada
+                const lastAssistantIdx = state.messages.length - 2; // -1 es el system, -2 es el assistant
+                state.messages[lastAssistantIdx] = verifiedAssistant as any;
+                return { final: verifiedAssistant, messages: state.messages, trace: state.trace, context_tools: state.contextToolsOut };
+              }
+            }
+          }
+        }
+        
         break;
       }
 
